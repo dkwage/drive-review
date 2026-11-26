@@ -21,16 +21,16 @@ def list_zip(path, archive, stop=None):
     with ZipFile(path, allowZip64=True) as source:
         for entry in source.infolist():
             if stop is not None and stop.is_set():
-                raise InterruptedError("스캔이 취소되었습니다.")
+                raise InterruptedError("Scan canceled.")
             if entry.flag_bits & 1:
-                raise ValueError("암호화된 ZIP입니다.")
+                raise ValueError("The ZIP archive is encrypted.")
             name = entry.filename.removesuffix("/")
             relative_parts(name)
             if name in names:
-                raise ValueError(f"이름이 중복된 ZIP 항목: {name}")
+                raise ValueError(f"Duplicate ZIP entry name: {name}")
             names.add(name)
             if stat.S_ISLNK(entry.external_attr >> 16):
-                raise ValueError(f"ZIP에 심볼릭 링크가 있습니다: {name}")
+                raise ValueError(f"The ZIP contains a symbolic link: {name}")
             if entry.is_dir():
                 directories.add(name)
                 continue
@@ -47,10 +47,10 @@ def validate_item(root, item):
     path = safe_path(root, item.rel_path)
     info = path.lstat()
     if is_link(info) or not stat.S_ISREG(info.st_mode):
-        raise ValueError(f"일반 파일이 아닙니다: {item.rel_path}")
+        raise ValueError(f"The path is not a regular file: {item.rel_path}")
     expected = item.archive_stamp if item.zip_entry else f"{item.size}:{item.mtime_ns}"
     if file_stamp(info) != expected:
-        raise OSError(f"스캔 후 파일이 변경되었습니다: {item.rel_path}")
+        raise OSError(f"The file changed after scanning: {item.rel_path}")
     return path, info
 
 
@@ -81,7 +81,7 @@ class ItemReader(AbstractContextManager):
             archive = self.archive(path, info)
             member = archive.getinfo(item.zip_entry)
             if member.CRC != item.crc or member.file_size != item.size:
-                raise OSError(f"스캔 후 ZIP 항목이 변경되었습니다: {item.identity}")
+                raise OSError(f"The ZIP entry changed after scanning: {item.identity}")
             with archive.open(member) as stream:
                 yield stream
         else:
@@ -90,7 +90,7 @@ class ItemReader(AbstractContextManager):
         final = path.lstat()
         if (file_stamp(final), final.st_dev, final.st_ino, final.st_ctime_ns) != (
                 file_stamp(info), info.st_dev, info.st_ino, info.st_ctime_ns):
-            raise OSError(f"읽는 동안 파일이 변경되었습니다: {item.rel_path}")
+            raise OSError(f"The file changed while it was being read: {item.rel_path}")
 
 
 @contextmanager

@@ -17,7 +17,7 @@ CATEGORIES = {
     "Etc": "",
 }
 EXTENSIONS = {ext: category for category, text in CATEGORIES.items() for ext in text.split()}
-CATEGORY_LABELS = dict(zip(CATEGORIES, ("영상", "사진", "문서", "음악", "압축", "디자인·편집", "기타")))
+CATEGORY_LABELS = dict(zip(CATEGORIES, ("Video", "Photos", "Documents", "Audio", "Archives", "Design", "Other")))
 
 
 def category_for(name):

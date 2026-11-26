@@ -34,7 +34,7 @@ class ReviewModel(QAbstractListModel):
         if role in (Qt.ItemDataRole.ToolTipRole, Qt.ItemDataRole.AccessibleDescriptionRole):
             values = [item.identity, bytes_label(item.size)]
             if flag := self.flag_states.get(item.key):
-                values.append("업로드" if flag == "green" else "격리")
+                values.append("Upload" if flag == "green" else "Delete")
             if duplicate := self.duplicates.get(item.key):
                 values.append(duplicate)
             if item.warning:
@@ -94,7 +94,7 @@ class Folder:
 class FolderModel(QAbstractItemModel):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.root = Folder("전체 파일", "", None)
+        self.root = Folder("All files", "", None)
         self.nodes = {"": self.root}
         self.archives = set()
         style = QApplication.style()
@@ -102,7 +102,7 @@ class FolderModel(QAbstractItemModel):
         self.archive_icon = style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView)
 
     def rebuild(self, directories, archives):
-        root = Folder("전체 파일", "", None)
+        root = Folder("All files", "", None)
         nodes = {"": root}
         for path in directories | archives:
             parent = root

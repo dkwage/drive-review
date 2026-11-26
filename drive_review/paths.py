@@ -41,12 +41,12 @@ def relative_parts(value):
     parts = path.parts
     if (not parts or path.is_absolute() or path.as_posix() != value
             or ".." in parts or "\\" in value or ":" in value or "\x00" in value):
-        raise ValueError(f"안전하지 않은 상대 경로: {value!r}")
+        raise ValueError(f"Unsafe relative path: {value!r}")
     if sys.platform == "win32":
         for part in parts:
             if (part.endswith((" ", ".")) or any(ord(c) < 32 or c in '<>"|?*' for c in part)
                     or Path(part).is_reserved()):
-                raise ValueError(f"Windows에서 사용할 수 없는 경로: {value!r}")
+                raise ValueError(f"Path is invalid on Windows: {value!r}")
     return parts
 
 
@@ -61,7 +61,7 @@ def safe_path(root, relative, *, create_parents=False):
     parts = relative_parts(relative)
     current = native_path(root)
     if not current.is_dir():
-        raise FileNotFoundError(f"폴더에 접근할 수 없습니다: {root}")
+        raise FileNotFoundError(f"Cannot access folder: {root}")
     for i, part in enumerate(parts):
         current = current / part
         try:
@@ -75,7 +75,7 @@ def safe_path(root, relative, *, create_parents=False):
                 pass
             info = current.lstat()
         if is_link(info):
-            raise ValueError(f"링크 경로를 사용할 수 없습니다: {relative}")
+            raise ValueError(f"Links are not allowed in the path: {relative}")
     return current
 
 
@@ -83,12 +83,12 @@ def outside_source(root, destination):
     source = native_path(root).resolve()
     target = native_path(destination).resolve()
     if target.is_relative_to(source):
-        raise ValueError("원본 드라이브 또는 폴더 밖에 저장하세요.")
+        raise ValueError("Choose a location outside the source drive or folder.")
     # An external volume remains protected when a subfolder was selected.
     from .drives import external_volume
     volume = external_volume(root)
     if volume and target.is_relative_to(native_path(volume).resolve()):
-        raise ValueError("원본 드라이브 밖에 저장하세요.")
+        raise ValueError("Choose a location outside the source drive.")
     return target
 
 

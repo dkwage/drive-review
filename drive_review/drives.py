@@ -87,7 +87,7 @@ def identify_drive(root):
     from .paths import display_path, native_path
 
     root = Path(display_path(native_path(root).resolve()))
-    label = root.name or root.drive or "드라이브"
+    label = root.name or root.drive or "Drive"
     serial = ""
     relative = ""
     if sys.platform == "win32":

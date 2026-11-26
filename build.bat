@@ -21,5 +21,8 @@ if errorlevel 1 (
 
 set "QT_QPA_PLATFORM=offscreen"
 "%PYTHON%" -m unittest discover -s tests || exit /b 1
-"%PYTHON%" -m PyInstaller --noconfirm --clean --onedir --windowed --name DriveReview main.py || exit /b 1
+"%PYTHON%" -m PyInstaller --noconfirm --clean --onedir --windowed --name DriveReview ^
+    --hidden-import PySide6.QtMultimedia --hidden-import PySide6.QtMultimediaWidgets ^
+    --hidden-import PySide6.QtPdf --hidden-import PySide6.QtPdfWidgets ^
+    --additional-hooks-dir packaging_hooks --collect-binaries pillow_heif main.py || exit /b 1
 echo Built dist\DriveReview\DriveReview.exe

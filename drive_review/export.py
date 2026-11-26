@@ -17,7 +17,7 @@ from .paths import move_no_replace, outside_source, safe_path
 from .zipsource import ItemReader
 
 MANIFEST = ("dest_path", "source_rel_path", "zip_entry", "hash")
-HEADERS = ("분류", "파일명", "확장자", "상대 경로", "크기(바이트)", "수정 시간", "Flag", "Hash")
+HEADERS = ("Category", "File Name", "Extension", "Relative Path", "Size (bytes)", "Modified", "Flag", "Hash")
 EXCEL_ROWS = 1_048_575
 
 
@@ -51,21 +51,21 @@ def prepare_upload(root, destination, items, flags, stop=None, progress=lambda c
     selected = [(item, flag) for item in items if (flag := flags.get(item.key))
                 and flag.flag == "green" and flag.matches(item)]
     if not selected:
-        raise ValueError("업로드 플래그가 지정된 파일이 없습니다.")
+        raise ValueError("No files are flagged Upload.")
     paths = list(_upload_paths(selected))
     with tempfile.TemporaryDirectory(prefix=".drive-review-", dir=destination) as directory, ItemReader() as reader:
         staging = Path(directory)
         top_level = {relative.split("/", 1)[0] for _item, _flag, relative in paths} | {"manifest.csv"}
         for name in top_level:
             if os.path.lexists(destination / name):
-                raise FileExistsError(f"이미 존재하는 업로드 세트 경로: {destination / name}")
+                raise FileExistsError(f"Upload destination already exists: {destination / name}")
         for count, (item, flag, relative) in enumerate(paths, 1):
             check_cancel(stop)
             output = safe_path(staging, relative, create_parents=True)
             with reader.open(root, item) as source, output.open("xb") as target:
                 digest, _ = hash_stream(source, stop, target)
             if flag.hash and digest != flag.hash:
-                raise OSError(f"검토한 내용과 다른 파일입니다: {item.identity}")
+                raise OSError(f"The file contents changed after review: {item.identity}")
             rows.append(dict(zip(MANIFEST, (relative, item.rel_path, item.zip_entry, digest))))
             if count % 16 == 0 or count == len(selected):
                 progress(count, len(selected))
@@ -86,7 +86,7 @@ def prepare_upload(root, destination, items, flags, stop=None, progress=lambda c
 
 
 def sheet_title(label, existing):
-    base = re.sub(r"[\\/*?:\[\]\x00-\x1f]", "_", label).strip(" '") or "드라이브"
+    base = re.sub(r"[\\/*?:\[\]\x00-\x1f]", "_", label).strip(" '") or "Drive"
     if base.casefold() == "history":
         base += "_"
     titles = {title.casefold() for title in existing}
@@ -107,7 +107,7 @@ def inventory_excel(root, destination, label, items, flags, hashes, stop=None,
                     progress=lambda count, total: None):
     destination = outside_source(root, destination)
     if destination.suffix.lower() != ".xlsx":
-        raise ValueError(".xlsx 파일을 선택하세요.")
+        raise ValueError("Choose an .xlsx file.")
     streaming = not destination.exists()
     book = Workbook(write_only=True) if streaming else load_workbook(destination)
     temp = None

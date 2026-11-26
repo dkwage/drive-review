@@ -129,7 +129,7 @@ class DuplicateTests(unittest.TestCase):
         stop = Event()
 
         def cancel(count, total, phase):
-            if phase == "전체 해시":
+            if phase == "Full hashing":
                 stop.set()
 
         drive = identify_drive(root)

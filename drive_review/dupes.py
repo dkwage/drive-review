@@ -21,7 +21,7 @@ def new_digest():
 
 def check_cancel(stop):
     if stop is not None and stop.is_set():
-        raise InterruptedError("작업이 취소되었습니다.")
+        raise InterruptedError("Operation canceled.")
 
 
 def partial_hash(root, item, stop):
@@ -138,7 +138,7 @@ def _find_duplicates(drive, items, flags, index, reader, stop, progress, verify)
             except Exception as error:
                 errors.append(f"{record.item.identity}: {error}")
             if count % 64 == 0 or count == len(current):
-                progress(count, len(current), "부분 해시")
+                progress(count, len(current), "Partial hashing")
 
         # Within size buckets, prioritize matching loose-file edge hashes and ZIP CRCs.
         # A loose file with unknown CRC must remain a candidate for an equal-sized ZIP entry.
@@ -178,7 +178,7 @@ def _find_duplicates(drive, items, flags, index, reader, stop, progress, verify)
             except Exception as error:
                 errors.append(f"{record.item.identity}: {error}")
             if count % 16 == 0 or count == len(eligible):
-                progress(count, len(eligible), "전체 해시")
+                progress(count, len(eligible), "Full hashing")
     finally:
         if changed:
             index.update_hashes(changed)
@@ -212,7 +212,7 @@ def _find_duplicates(drive, items, flags, index, reader, stop, progress, verify)
                         if record.drive_id not in available:
                             available[record.drive_id] = identify_drive(record.root).id == record.drive_id
                         if not available[record.drive_id]:
-                            raise OSError("드라이브를 사용할 수 없습니다.")
+                            raise OSError("The drive is unavailable.")
                     if same_bytes(reference, record, stop, reader):
                         confirmed.append(record)
                 except InterruptedError:
@@ -236,5 +236,5 @@ def _find_duplicates(drive, items, flags, index, reader, stop, progress, verify)
                            and r.drive_id == drive.id and not r.flag and id(r) in confirmed_ids]
             groups.append(Group(records, keeper, suggestions, unverified))
         if verify and (count % 8 == 0 or count == len(candidates)):
-            progress(count, len(candidates), "바이트 비교")
+            progress(count, len(candidates), "Byte comparison")
     return DuplicateResult(groups, hashes, errors)

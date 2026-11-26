@@ -17,12 +17,14 @@ from .zipsource import open_item
 MAX_AUTO_MEMBER = 64 * 1024 * 1024
 
 
-def copy_for_view(root, item, directory, stop=None):
+def copy_for_view(root, item, directory, stop=None, progress=lambda count, total: None):
     # A viewer can only access a temporary copy, even if it supports editing.
     name = item.name
     if sys.platform == "win32" and len(str(Path(directory) / name)) > 245:
         name = "preview" + Path(name).suffix[:24]
     output = safe_path(directory, name)
+    copied = 0
+    progress(copied, item.size)
     with open_item(root, item) as source, output.open("xb") as target:
         while True:
             check_cancel(stop)
@@ -30,6 +32,9 @@ def copy_for_view(root, item, directory, stop=None):
             if not data:
                 break
             target.write(data)
+            copied += len(data)
+            if copied == item.size or copied % (CHUNK * 16) == 0:
+                progress(copied, item.size)
     return Path(display_path(output))
 
 

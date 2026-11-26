@@ -65,27 +65,27 @@ def read_flags(path):
     with Path(path).open(encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
         if reader.fieldnames != list(FLAG_COLUMNS):
-            raise ValueError(f"flags.csv 열이 올바르지 않습니다: {path}")
+            raise ValueError(f"Invalid flags.csv columns: {path}")
         for row in reader:
             try:
                 if None in row or None in row.values() or row["flag"] not in {"green", "red"}:
-                    raise ValueError("잘못된 플래그")
+                    raise ValueError("Invalid flag")
                 relative_parts(row["rel_path"])
                 if row["rel_path"].split("/", 1)[0].casefold() == REVIEW_DIR:
-                    raise ValueError("내부 관리 경로")
+                    raise ValueError("Drive Review management path")
                 if row["zip_entry"]:
                     relative_parts(row["zip_entry"])
                 row["size"] = int(row["size"])
                 if row["size"] < 0:
-                    raise ValueError("잘못된 크기")
+                    raise ValueError("Invalid size")
                 row["mtime_iso"] = datetime.fromisoformat(row["mtime_iso"]).astimezone(
                     timezone.utc).isoformat(timespec="microseconds")
                 flag = Flag(**row)
                 if flag.key in flags:
-                    raise ValueError("중복 플래그")
+                    raise ValueError("Duplicate flag")
                 flags[flag.key] = flag
             except (ValueError, TypeError) as error:
-                raise ValueError(f"flags.csv {reader.line_num}행: {error}") from error
+                raise ValueError(f"flags.csv line {reader.line_num}: {error}") from error
     return flags
 
 

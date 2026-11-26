@@ -42,7 +42,7 @@ def scan(root, show_hidden=False, stop=None, progress=lambda count, path: None):
 
     def check_cancel():
         if stop is not None and stop.is_set():
-            raise InterruptedError("스캔이 취소되었습니다.")
+            raise InterruptedError("Scan canceled.")
 
     pending = [(root, "")]
     while pending:
@@ -96,12 +96,12 @@ def scan(root, show_hidden=False, stop=None, progress=lambda count, path: None):
             raise
         except OSError as error:
             if not rel_folder or not root.is_dir():
-                raise OSError(f"원본 드라이브에 접근할 수 없습니다: {root}") from error
+                raise OSError(f"Cannot access the source drive: {root}") from error
             result.errors.append(str(error))
             result.incomplete = True
     check_cancel()
     if not root.is_dir():
-        raise OSError(f"원본 드라이브 연결이 끊겼습니다: {root}")
+        raise OSError(f"The source drive was disconnected: {root}")
     progress(len(result.items), "")
     return result
 
@@ -115,12 +115,12 @@ def flagged_items(root, flags, status, stop=None, *, include_entries=True):
     items, errors = [], []
     for relative, selected in by_path.items():
         if stop is not None and stop.is_set():
-            raise InterruptedError("작업이 취소되었습니다.")
+            raise InterruptedError("Operation canceled.")
         try:
             path = safe_path(root, relative)
             info = path.lstat()
             if is_link(info) or not stat.S_ISREG(info.st_mode):
-                raise ValueError("일반 파일이 아닙니다.")
+                raise ValueError("The path is not a regular file.")
         except (OSError, ValueError) as error:
             errors.append(f"{relative}: {error}")
             continue
@@ -140,5 +140,5 @@ def flagged_items(root, flags, status, stop=None, *, include_entries=True):
                 items.append(candidate)
             else:
                 label = f"{relative}::{flag.zip_entry}" if flag.zip_entry else relative
-                errors.append(f"검토 후 변경되었거나 없는 파일: {label}")
+                errors.append(f"The file changed or is missing: {label}")
     return items, errors
