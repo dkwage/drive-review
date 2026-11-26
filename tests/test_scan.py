@@ -80,3 +80,21 @@ class ScanTests(unittest.TestCase):
                 scan(root, stop=stop)
             with self.assertRaises(OSError):
                 scan(root / "unplugged")
+
+
+class CreatedDateTests(unittest.TestCase):
+    def test_scanned_files_carry_creation_time_and_sort_by_it(self):
+        import tempfile, time
+        from pathlib import Path
+        from drive_review.items import date_label
+        from drive_review.scan import scan
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "old.txt").write_text("a")
+            time.sleep(0.05)
+            Path(folder, "new.txt").write_text("b")
+            items = scan(folder).items
+            self.assertTrue(all(item.ctime_ns > 0 for item in items))
+            newest = max(items, key=lambda item: item.ctime_ns)
+            self.assertEqual(newest.name, "new.txt")
+            self.assertNotEqual(date_label(newest.ctime_ns), "—")
+        self.assertEqual(date_label(0), "—")

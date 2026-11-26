@@ -99,7 +99,7 @@ class ReviewSmokeTests(unittest.TestCase):
                 selection.select(QItemSelection(first, second), QItemSelectionModel.SelectionFlag.ClearAndSelect)
                 window.activateWindow()
                 window.grid.setFocus()
-                QTest.keyClick(window.grid, Qt.Key.Key_P)
+                QTest.keyClick(window.grid, Qt.Key.Key_Z)
                 path = root / "_drive_review" / "flags.csv"
                 self.wait_until(lambda: path.exists() and window.saved_revision == window.revision)
                 flags = read_flags(path)
@@ -109,9 +109,9 @@ class ReviewSmokeTests(unittest.TestCase):
 
                 QTest.keyClick(window.grid, Qt.Key.Key_X)
                 self.assertEqual({flag.flag for flag in window.flags.values()}, {"red"})
-                QTest.keyClick(window.grid, Qt.Key.Key_U)
+                QTest.keyClick(window.grid, Qt.Key.Key_C)
                 self.assertEqual(window.flags, {})
-                QTest.keyClick(window.grid, Qt.Key.Key_P)
+                QTest.keyClick(window.grid, Qt.Key.Key_Z)
                 self.wait_until(lambda: window.saved_revision == window.revision)
                 window.open_root(root)
                 self.wait_until(lambda: window.operation is None)
@@ -213,7 +213,7 @@ class ReviewSmokeTests(unittest.TestCase):
                 preview.fit.click()
                 self.assertAlmostEqual(preview.image.transform().m11(), scale)
 
-                QTest.keyClick(preview, Qt.Key.Key_P)
+                QTest.keyClick(preview, Qt.Key.Key_Z)
                 self.assertEqual(preview.flag.text(), "Upload")
                 QTest.keyClick(preview, Qt.Key.Key_Right)
                 self.wait_until(lambda: preview.stack.currentWidget() is preview.pdf)
@@ -224,7 +224,7 @@ class ReviewSmokeTests(unittest.TestCase):
                 self.assertEqual(preview.text.toPlainText(), "Notes for Quick Look")
                 QTest.keyClick(preview.text, Qt.Key.Key_X)
                 self.assertEqual(preview.flag.text(), "Delete")
-                QTest.keyClick(preview.text, Qt.Key.Key_U)
+                QTest.keyClick(preview.text, Qt.Key.Key_C)
                 self.assertEqual(preview.flag.text(), "Unflagged")
                 QTest.keyClick(preview.text, Qt.Key.Key_Escape)
                 self.assertFalse(preview.isVisible())

@@ -23,7 +23,7 @@ E_NOINTERFACE = -2147467262
 E_NOTIMPL = -2147467263
 PREVIEW_KEYS = {
     0x1B: "Escape", 0x20: "Space", 0x25: "Left", 0x26: "Up", 0x27: "Right", 0x28: "Down",
-    ord("P"): "P", ord("X"): "X", ord("U"): "U",
+    ord("Z"): "Z", ord("X"): "X", ord("C"): "C",
 }
 
 

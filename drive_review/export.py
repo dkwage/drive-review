@@ -17,7 +17,7 @@ from .paths import move_no_replace, outside_source, safe_path
 from .zipsource import ItemReader
 
 MANIFEST = ("dest_path", "source_rel_path", "zip_entry", "hash")
-HEADERS = ("Category", "File Name", "Extension", "Relative Path", "Size (bytes)", "Modified", "Flag", "Hash")
+HEADERS = ("Category", "File Name", "Extension", "Relative Path", "Size (bytes)", "Created", "Modified", "Flag", "Hash")
 EXCEL_ROWS = 1_048_575
 
 
@@ -139,7 +139,7 @@ def inventory_excel(root, destination, label, items, flags, hashes, stop=None,
                     status = flag.flag if flag and flag.matches(item) and (
                         not known_hash or flag.hash in ("", known_hash)) else ""
                     values = (CATEGORY_LABELS[item.category], item.name, PurePosixPath(item.name).suffix.lower(),
-                              item.identity, item.size, iso_mtime(item.mtime_ns), status,
+                              item.identity, item.size, iso_mtime(item.ctime_ns) if item.ctime_ns else "", iso_mtime(item.mtime_ns), status,
                               known_hash or (flag.hash if status else ""))
                     values = [text_cell(value) if isinstance(value, str) else value for value in values]
                     if streaming:

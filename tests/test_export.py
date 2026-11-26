@@ -57,7 +57,7 @@ class ExportTests(unittest.TestCase):
                 self.assertEqual(sheet.auto_filter.ref, "A1:H4")
                 row = next(row for row in sheet.iter_rows(min_row=2) if row[1].value == item.name)
                 self.assertEqual(row[1].data_type, "s")
-                self.assertEqual((row[6].value, row[7].value), ("green", "abc123"))
+                self.assertEqual((row[7].value, row[8].value), ("green", "abc123"))
         finally:
             book.close()
 

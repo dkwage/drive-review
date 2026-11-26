@@ -134,7 +134,7 @@ class ReviewDelegate(QStyledItemDelegate):
         duplicate = model.duplicates.get(item.key)
         chips = []
         if flag:
-            chips.append(("P", "#087654") if flag == "green" else ("X", "#B43C38"))
+            chips.append(("✓", "#087654") if flag == "green" else ("✕", "#B43C38"))
         if duplicate:
             chips.append(("=", "#6D509A"))
         if item.warning:

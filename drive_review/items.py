@@ -1,6 +1,7 @@
 """Review items and extension categories."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import sys
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
@@ -31,6 +32,20 @@ def iso_mtime(mtime_ns):
     ).isoformat(timespec="microseconds")
 
 
+def created_ns(info):
+    """File creation time from a stat result, or 0 when the platform does not record it."""
+    if (value := getattr(info, "st_birthtime_ns", None)) is not None:
+        return value
+    if (value := getattr(info, "st_birthtime", None)) is not None:
+        return int(value * 10**9)
+    return info.st_ctime_ns if sys.platform == "win32" else 0
+
+
+def date_label(ns):
+    from datetime import datetime
+    return datetime.fromtimestamp(ns // 10**9).strftime("%Y-%m-%d %H:%M") if ns else "—"
+
+
 def bytes_label(size):
     value = float(size)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
@@ -48,6 +63,7 @@ class Item:
     crc: int | None = None
     archive_stamp: str = ""
     warning: str = ""
+    ctime_ns: int = field(default=0, compare=False)  # creation time; 0 = unknown (ZIP entries, index)
 
     @property
     def key(self):

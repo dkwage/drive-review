@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from PySide6.QtCore import QAbstractItemModel, QAbstractListModel, QModelIndex, Qt
 from PySide6.QtWidgets import QApplication, QStyle
 
-from ..items import bytes_label
+from ..items import bytes_label, date_label
 
 ITEM = Qt.ItemDataRole.UserRole + 1
 FOLDER = Qt.ItemDataRole.UserRole + 2
@@ -32,7 +32,8 @@ class ReviewModel(QAbstractListModel):
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.AccessibleTextRole):
             return item.name
         if role in (Qt.ItemDataRole.ToolTipRole, Qt.ItemDataRole.AccessibleDescriptionRole):
-            values = [item.identity, bytes_label(item.size)]
+            values = [item.identity, bytes_label(item.size),
+                      f"Created {date_label(item.ctime_ns)} · Modified {date_label(item.mtime_ns)}"]
             if flag := self.flag_states.get(item.key):
                 values.append("Upload" if flag == "green" else "Delete")
             if duplicate := self.duplicates.get(item.key):
@@ -65,6 +66,8 @@ class ReviewModel(QAbstractListModel):
             matches.sort(key=lambda item: (item.size, item.name.casefold()))
         elif sort == "date":
             matches.sort(key=lambda item: (item.mtime_ns, item.name.casefold()), reverse=True)
+        elif sort == "created":
+            matches.sort(key=lambda item: (item.ctime_ns, item.name.casefold()), reverse=True)
         elif sort == "folder":
             matches.sort(key=lambda item: (item.folder.casefold(), item.name.casefold()))
         else:

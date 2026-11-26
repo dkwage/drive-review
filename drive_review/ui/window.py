@@ -212,7 +212,7 @@ class MainWindow(QMainWindow):
         self.flag_filter = self._combo([("All flags", ""), ("Unflagged", "none"), ("Upload", "green"),
                                        ("Delete", "red"), ("Duplicate", "duplicate")])
         self.sort = self._combo([("By name", "name"), ("By size", "size"),
-                                 ("By date", "date"), ("By folder", "folder")])
+                                 ("By modified", "date"), ("By created", "created"), ("By folder", "folder")])
         self.search = QLineEdit(placeholderText="Search file names or paths")
         self.search.setClearButtonEnabled(True)
         self.search.setAccessibleName("Search files")
@@ -280,7 +280,7 @@ class MainWindow(QMainWindow):
         gallery_top.addWidget(self.visible_count)
         gallery_top.addWidget(self.selection_count)
         gallery_top.addStretch()
-        gallery_top.addWidget(QLabel("P Upload   X Delete   U Clear   Space Quick Look"))
+        gallery_top.addWidget(QLabel("Z Upload   X Delete   C Clear   Space Quick Look"))
         right.addLayout(gallery_top)
 
         self.grid = QListView()
@@ -303,9 +303,9 @@ class MainWindow(QMainWindow):
         self._resize_thumbs(self.thumb_size.value())
         self.grid.doubleClicked.connect(lambda _index: self.open_selected())
         self.grid.selectionModel().selectionChanged.connect(self._selected_count)
-        for key, handler in (("P", partial(self.mark_selected, "green")),
+        for key, handler in (("Z", partial(self.mark_selected, "green")),
                              ("X", partial(self.mark_selected, "red")),
-                             ("U", partial(self.mark_selected, "")), ("Space", self.preview_selected),
+                             ("C", partial(self.mark_selected, "")), ("Space", self.preview_selected),
                              ("Return", self.open_selected), ("Enter", self.open_selected)):
             shortcut = QShortcut(QKeySequence(key), self.grid)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)

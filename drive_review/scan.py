@@ -5,7 +5,7 @@ import os
 import stat
 from zipfile import BadZipFile, LargeZipFile
 
-from .items import Item
+from .items import Item, created_ns
 from .paths import REVIEW_DIR, is_link, native_path, safe_path
 from .zipsource import list_zip
 
@@ -70,7 +70,7 @@ def scan(root, show_hidden=False, stop=None, progress=lambda count, path: None):
                         result.errors.append(str(error))
                         result.incomplete = True
                         continue
-                    item = Item(rel_path, info.st_size, info.st_mtime_ns)
+                    item = Item(rel_path, info.st_size, info.st_mtime_ns, ctime_ns=created_ns(info))
                     result.items.append(item)
                     if len(result.items) % 128 == 0:
                         progress(len(result.items), rel_path)
@@ -124,7 +124,7 @@ def flagged_items(root, flags, status, stop=None, *, include_entries=True):
         except (OSError, ValueError) as error:
             errors.append(f"{relative}: {error}")
             continue
-        item = Item(relative, info.st_size, info.st_mtime_ns)
+        item = Item(relative, info.st_size, info.st_mtime_ns, ctime_ns=created_ns(info))
         found = {"": item}
         if any(flag.zip_entry for flag in selected):
             try:

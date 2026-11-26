@@ -14,9 +14,9 @@ Extract `DriveReview-Windows.zip` and run `DriveReview.exe` from the extracted `
 
 | Key | Action |
 | --- | --- |
-| P | Flag for **Upload** (green) |
+| Z | Flag for **Upload** (green) |
 | X | Flag for **Delete** (red) |
-| U | Clear the flag |
+| C | Clear the flag |
 | Arrow keys | Move the grid selection |
 | Space | Open or close Quick Look |
 | Esc | Close Quick Look |
@@ -26,7 +26,7 @@ Search by name or path, filter by category or flag, and sort by name, size, date
 
 ### Quick Look
 
-Press Space on a selected file. The panel shows the name, size, modification date, path, flag, and position in the current grid. It remembers its size. The arrow keys move the grid selection while the panel is open. P, X, and U apply to the current file.
+Press Space on a selected file. The panel shows the name, size, creation and modification dates, path, flag, and position in the current grid. It remembers its size. The arrow keys move the grid selection while the panel is open. Z, X, and C apply to the current file; the same actions are buttons at the bottom of the panel.
 
 - Images open at full resolution where a decoder is available and fit the window by default. Use the mouse wheel or **+** and **−** to zoom. Click **Fit** to reset the zoom. The Windows Shell can supply a large thumbnail for RAW and other formats with an installed codec.
 - Play video and audio inline. Press **K** or click **Play** or **Pause**. The controls include seeking, elapsed time, volume, and mute.
@@ -38,7 +38,7 @@ Press Space on a selected file. The panel shows the name, size, modification dat
 
 **Find duplicates** checks file size, partial hashes or ZIP CRC32, and full BLAKE2b hashes. **Byte comparison** also compares matching files directly when they are accessible. The first pass reads files to build a cross-drive baseline. Restarting an interrupted pass reuses saved hashes.
 
-Use **Duplicate groups** to review suggested keepers and matching drives. Automatic Delete flags have the reason `duplicate`. You can change them with P, X, or U. When review is complete, close Drive Review to finish saving flags, then safely eject the drive.
+Use **Duplicate groups** to review suggested keepers and matching drives. Automatic Delete flags have the reason `duplicate`. You can change them with Z, X, or C. When review is complete, close Drive Review to finish saving flags, then safely eject the drive.
 
 ## Owner actions
 

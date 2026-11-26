@@ -1,6 +1,5 @@
 """Modeless Quick Look panel and its Qt viewers."""
 
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 
@@ -16,7 +15,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ..items import bytes_label
+from ..items import bytes_label, date_label
 from ..paths import display_path
 from ..preview import PreviewKind, load_preview
 from ..preview_windows import show_handler
@@ -24,7 +23,7 @@ from .workers import Worker
 
 QUEUED = Qt.ConnectionType.QueuedConnection
 ARROWS = {Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down}
-FLAGS = {Qt.Key.Key_P: "green", Qt.Key.Key_X: "red", Qt.Key.Key_U: ""}
+FLAGS = {Qt.Key.Key_Z: "green", Qt.Key.Key_X: "red", Qt.Key.Key_C: ""}
 ZOOM_IN = {Qt.Key.Key_Plus, Qt.Key.Key_Equal}
 
 
@@ -264,6 +263,17 @@ class QuickLook(QDialog):
         close.clicked.connect(self.close)
         footer.addWidget(self.page_count)
         footer.addStretch()
+        for text, flag, tip in (("Z  Upload", "green", "Flag for upload (Z)"),
+                                ("X  Delete", "red", "Flag for deletion (X)"),
+                                ("C  Clear", "", "Clear the flag (C)")):
+            button = QPushButton(text)
+            button.setToolTip(tip)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.clicked.connect(partial(self.flag_requested.emit, flag))
+            footer.addWidget(button)
+        hint = self.label()
+        hint.setText("←→ next · K play/pause · Space/Esc close")
+        footer.addWidget(hint)
         footer.addWidget(self.fit)
         footer.addWidget(self.open_button)
         footer.addWidget(close)
@@ -290,8 +300,8 @@ class QuickLook(QDialog):
                 path = display_path(Path(root) / item.rel_path)
                 if item.zip_entry:
                     path += f"::{item.zip_entry}"
-                date = datetime.fromtimestamp(item.mtime_ns // 10**9).strftime("%Y-%m-%d %H:%M:%S")
-                self.details.setText(f"{bytes_label(item.size)} · Modified {date}")
+                self.details.setText(f"{bytes_label(item.size)} · Created {date_label(item.ctime_ns)}"
+                                     f" · Modified {date_label(item.mtime_ns)}")
             else:
                 self.details.clear()
             self.path.setText(path)
