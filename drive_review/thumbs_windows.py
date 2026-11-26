@@ -3,15 +3,16 @@
 import ctypes as c
 from ctypes import wintypes as w
 from functools import lru_cache
-import os
 import sys
 from uuid import UUID
 
 from PIL import Image
 
+from .paths import display_path
+
 
 class GUID(c.Structure):
-    _fields_ = [("data", c.c_byte * 16)]
+    _fields_ = [("data1", w.DWORD), ("data2", w.WORD), ("data3", w.WORD), ("data4", c.c_ubyte * 8)]
 
 
 class BITMAP(c.Structure):
@@ -28,7 +29,7 @@ class BITMAPINFO(c.Structure):
                 ("colors_important", w.DWORD), ("color", w.DWORD)]
 
 
-IMAGE_FACTORY = GUID.from_buffer_copy(UUID("bcc18b79-ba16-442f-80c4-8a59c30c463b").bytes_le)
+IMAGE_FACTORY = UUID("bcc18b79-ba16-442f-80c4-8a59c30c463b")
 
 
 @lru_cache(maxsize=1)
@@ -84,16 +85,10 @@ def shell_thumbnail(path, size):
         return None
     try:
         # Shell parsing often expects the normal DOS/UNC spelling. Try the long spelling as well.
-        extended = os.fspath(path)
-        if extended.startswith("\\\\?\\UNC\\"):
-            display = "\\\\" + extended[8:]
-        elif extended.startswith("\\\\?\\"):
-            display = extended[4:]
-        else:
-            display = extended
+        factory = GUID.from_buffer_copy(IMAGE_FACTORY.bytes_le)
         pointer = c.c_void_p()
-        for spelling in dict.fromkeys((display, extended)):
-            if shell.SHCreateItemFromParsingName(spelling, None, c.byref(IMAGE_FACTORY),
+        for spelling in dict.fromkeys((display_path(path), str(path))):
+            if shell.SHCreateItemFromParsingName(spelling, None, c.byref(factory),
                                                  c.byref(pointer)) >= 0:
                 break
         else:

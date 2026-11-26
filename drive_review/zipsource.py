@@ -1,12 +1,13 @@
 """List archive members by reading only the ZIP central directory."""
 
-from contextlib import contextmanager
+from collections import OrderedDict
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timezone
 import stat
 from zipfile import ZipFile
 
 from .items import Item
-from .paths import relative_parts, safe_path
+from .paths import is_link, relative_parts, safe_path
 
 
 def file_stamp(info):
@@ -42,25 +43,57 @@ def list_zip(path, archive, stop=None):
     return items, directories
 
 
-@contextmanager
-def open_item(root, item):
+def validate_item(root, item):
     path = safe_path(root, item.rel_path)
-    info = path.stat()
-    if not stat.S_ISREG(info.st_mode):
+    info = path.lstat()
+    if is_link(info) or not stat.S_ISREG(info.st_mode):
         raise ValueError(f"일반 파일이 아닙니다: {item.rel_path}")
-    if item.zip_entry:
-        if file_stamp(info) != item.archive_stamp:
-            raise OSError(f"스캔 후 ZIP이 변경되었습니다: {item.rel_path}")
-        with ZipFile(path, allowZip64=True) as archive:
+    expected = item.archive_stamp if item.zip_entry else f"{item.size}:{item.mtime_ns}"
+    if file_stamp(info) != expected:
+        raise OSError(f"스캔 후 파일이 변경되었습니다: {item.rel_path}")
+    return path, info
+
+
+class ItemReader(AbstractContextManager):
+    """Reuse a few central directories during a bulk operation."""
+
+    def __init__(self):
+        self.archives = OrderedDict()
+
+    def __exit__(self, *_error):
+        for archive in self.archives.values():
+            archive.close()
+        self.archives.clear()
+
+    def archive(self, path, info):
+        key = (path, info.st_dev, info.st_ino, info.st_ctime_ns)
+        if key not in self.archives:
+            self.archives[key] = ZipFile(path, allowZip64=True)
+            if len(self.archives) > 4:
+                self.archives.popitem(last=False)[1].close()
+        self.archives.move_to_end(key)
+        return self.archives[key]
+
+    @contextmanager
+    def open(self, root, item):
+        path, info = validate_item(root, item)
+        if item.zip_entry:
+            archive = self.archive(path, info)
             member = archive.getinfo(item.zip_entry)
             if member.CRC != item.crc or member.file_size != item.size:
                 raise OSError(f"스캔 후 ZIP 항목이 변경되었습니다: {item.identity}")
             with archive.open(member) as stream:
                 yield stream
-    else:
-        if (info.st_size, info.st_mtime_ns) != (item.size, item.mtime_ns):
-            raise OSError(f"스캔 후 파일이 변경되었습니다: {item.rel_path}")
-        with path.open("rb") as stream:
-            yield stream
-    if file_stamp(path.stat()) != file_stamp(info):
-        raise OSError(f"읽는 동안 파일이 변경되었습니다: {item.rel_path}")
+        else:
+            with path.open("rb") as stream:
+                yield stream
+        final = path.lstat()
+        if (file_stamp(final), final.st_dev, final.st_ino, final.st_ctime_ns) != (
+                file_stamp(info), info.st_dev, info.st_ino, info.st_ctime_ns):
+            raise OSError(f"읽는 동안 파일이 변경되었습니다: {item.rel_path}")
+
+
+@contextmanager
+def open_item(root, item):
+    with ItemReader() as reader, reader.open(root, item) as stream:
+        yield stream

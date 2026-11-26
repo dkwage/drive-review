@@ -16,7 +16,7 @@ class ReviewModel(QAbstractListModel):
         super().__init__(parent)
         self.items = []
         self.visible = []
-        self.flags = {}
+        self.flag_states = {}
         self.duplicates = {}
         self.rows = {}
 
@@ -33,7 +33,7 @@ class ReviewModel(QAbstractListModel):
             return item.name
         if role in (Qt.ItemDataRole.ToolTipRole, Qt.ItemDataRole.AccessibleDescriptionRole):
             values = [item.identity, bytes_label(item.size)]
-            if flag := self.flags.get(item.key):
+            if flag := self.flag_states.get(item.key):
                 values.append("업로드" if flag == "green" else "격리")
             if duplicate := self.duplicates.get(item.key):
                 values.append(duplicate)
@@ -51,7 +51,7 @@ class ReviewModel(QAbstractListModel):
                 continue
             if category and item.category != category:
                 continue
-            current = self.flags.get(item.key, "none")
+            current = self.flag_states.get(item.key, "none")
             if flag == "duplicate":
                 if item.key not in self.duplicates:
                     continue

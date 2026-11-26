@@ -2,12 +2,12 @@
 
 from collections import OrderedDict
 
-from PySide6.QtCore import QObject, QRect, QSize, Qt, QThreadPool, QTimer
+from PySide6.QtCore import QObject, QRect, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle
 
 from ..items import CATEGORY_LABELS, bytes_label
-from ..thumbs import ThumbnailCache
+from ..thumbs import MAX_AUTO_MEMBER, ThumbnailCache, can_thumbnail
 from .models import ITEM
 from .workers import Worker
 
@@ -23,6 +23,8 @@ COLORS = {
 
 
 class ThumbnailQueue(QObject):
+    idle = Signal()
+
     def __init__(self, cache, view):
         super().__init__(view)
         self.cache = cache
@@ -43,11 +45,13 @@ class ThumbnailQueue(QObject):
         self.images.clear()
 
     def cancel(self):
+        self.drive = None
         for worker in self.pending.values():
             worker.stop.set()
 
     def request(self, item, size):
-        if self.drive is None:
+        if (self.drive is None or not can_thumbnail(item)
+                or (item.zip_entry and (item.category == "Video" or item.size > MAX_AUTO_MEMBER))):
             return None
         key = ThumbnailCache.key(self.drive.id, item, size)
         if key in self.images:
@@ -70,6 +74,8 @@ class ThumbnailQueue(QObject):
                     self.images.popitem(last=False)
             if not self.repaint.isActive():
                 self.repaint.start()
+            if not self.pending:
+                self.idle.emit()
 
         worker = Worker(load)
         worker.signals.done.connect(finished, Qt.ConnectionType.QueuedConnection)
@@ -124,7 +130,7 @@ class ReviewDelegate(QStyledItemDelegate):
             painter.drawText(icon, Qt.AlignmentFlag.AlignCenter, CATEGORY_LABELS[item.category])
 
         model = index.model()
-        flag = model.flags.get(item.key)
+        flag = model.flag_states.get(item.key)
         duplicate = model.duplicates.get(item.key)
         chips = []
         if flag:

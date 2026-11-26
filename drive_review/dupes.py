@@ -3,12 +3,13 @@
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 import hashlib
+import os
 from zlib import crc32
 
 from .drives import identify_drive
 from .index import Record
 from .scan import is_junk
-from .zipsource import open_item
+from .zipsource import ItemReader, open_item, validate_item
 
 EDGE = 64 * 1024
 CHUNK = 1024 * 1024
@@ -48,8 +49,8 @@ def hash_stream(source, stop=None, destination=None):
     return digest.hexdigest(), checksum
 
 
-def same_bytes(left, right, stop):
-    with open_item(left.root, left.item) as a, open_item(right.root, right.item) as b:
+def same_bytes(left, right, stop, reader):
+    with reader.open(left.root, left.item) as a, reader.open(right.root, right.item) as b:
         while True:
             check_cancel(stop)
             first = a.read(CHUNK)
@@ -85,6 +86,15 @@ class DuplicateResult:
 
 def find_duplicates(drive, items, flags, index, stop=None, progress=lambda count, total, step: None,
                     verify=False):
+    with ItemReader() as reader:
+        return _find_duplicates(drive, items, flags, index, reader, stop, progress, verify)
+
+
+def _physical_path(root, item):
+    return os.path.join(root, *item.rel_path.split("/")).casefold(), item.zip_entry
+
+
+def _find_duplicates(drive, items, flags, index, reader, stop, progress, verify):
     current = []
     buckets = defaultdict(list)
     cached = index.cached(drive.id)
@@ -98,9 +108,11 @@ def find_duplicates(drive, items, flags, index, stop=None, progress=lambda count
             record.partial, record.digest, record.content_crc = saved[1:]
         current.append(record)
         buckets[item.size].append(record)
-    for record in index.previous(drive.id, buckets):
+    local_paths = {_physical_path(drive.root, item) for item in items}
+    for record in index.previous(drive, buckets):
         check_cancel(stop)
-        buckets[record.item.size].append(record)
+        if _physical_path(record.root, record.item) not in local_paths:
+            buckets[record.item.size].append(record)
 
     errors = []
     changed = []
@@ -151,10 +163,12 @@ def find_duplicates(drive, items, flags, index, stop=None, progress=lambda count
             check_cancel(stop)
             try:
                 if not record.digest:
-                    with open_item(record.root, record.item) as source:
+                    with reader.open(record.root, record.item) as source:
                         digest, checksum = hash_stream(source, stop)
                     record.digest, record.content_crc = digest, checksum
                     save(record)
+                else:
+                    validate_item(record.root, record.item)
                 flag = flags.get(record.item.key)
                 if flag and flag.hash and flag.hash != record.digest:
                     record.flag = ""
@@ -173,7 +187,8 @@ def find_duplicates(drive, items, flags, index, stop=None, progress=lambda count
     for records in buckets.values():
         check_cancel(stop)
         for record in records:
-            if record.digest and (record.drive_id != drive.id or record.item.key in hashes):
+            if (record.digest and possible(record)
+                    and (record.drive_id != drive.id or record.item.key in hashes)):
                 matches[record.item.size, record.digest].append(record)
 
     groups = []
@@ -198,7 +213,7 @@ def find_duplicates(drive, items, flags, index, stop=None, progress=lambda count
                             available[record.drive_id] = identify_drive(record.root).id == record.drive_id
                         if not available[record.drive_id]:
                             raise OSError("드라이브를 사용할 수 없습니다.")
-                    if same_bytes(reference, record, stop):
+                    if same_bytes(reference, record, stop, reader):
                         confirmed.append(record)
                 except InterruptedError:
                     raise

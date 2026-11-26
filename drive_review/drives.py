@@ -84,9 +84,9 @@ def external_volume(root):
 
 
 def identify_drive(root):
-    from .paths import native_path
+    from .paths import display_path, native_path
 
-    root = Path(root).absolute()
+    root = Path(display_path(native_path(root).resolve()))
     label = root.name or root.drive or "드라이브"
     serial = ""
     relative = ""
@@ -99,15 +99,19 @@ def identify_drive(root):
         name = ctypes.create_unicode_buffer(256)
         number = wintypes.DWORD()
         if (kernel.GetVolumePathNameW(str(native_path(root)), mount, buffersize)
-                and kernel.GetVolumeInformationW(mount, name, len(name), ctypes.byref(number),
-                                                 None, None, None, 0)):
-            serial = f"{number.value:08X}"
-            if root == Path(mount.value):
-                label = name.value or label
-            relative = os.path.relpath(str(root), mount.value).casefold()
+                or kernel.GetVolumePathNameW(str(root), mount, buffersize)):
+            if kernel.GetVolumeInformationW(mount, name, len(name), ctypes.byref(number),
+                                            None, None, None, 0):
+                volume_root = Path(display_path(mount.value))
+                serial = f"{number.value:08X}"
+                if root == volume_root:
+                    label = name.value or label
+                if root.is_relative_to(volume_root):
+                    relative = str(root.relative_to(volume_root)).casefold()
     elif sys.platform == "darwin" and root.is_relative_to("/Volumes"):
         try:
-            info = plistlib.loads(_command(["diskutil", "info", "-plist", str(root)]))
+            volume = external_volume(root)
+            info = plistlib.loads(_command(["diskutil", "info", "-plist", str(volume)])) if volume else {}
             serial = info.get("VolumeUUID") or info.get("DiskUUID", "")
             if mount := info.get("MountPoint"):
                 relative = os.path.relpath(root, mount)

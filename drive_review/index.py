@@ -106,7 +106,7 @@ class Index:
                            [(r.partial, r.digest, r.content_crc, r.drive_id, *r.item.key, r.item.size,
                              r.item.mtime_ns, r.item.crc, r.item.archive_stamp) for r in records])
 
-    def previous(self, current_drive_id, sizes):
+    def previous(self, drive, sizes):
         sizes = sorted(sizes)
         with self.connect() as db:
             for start in range(0, len(sizes), 500):
@@ -116,10 +116,11 @@ class Index:
                             f.drive_id, d.label, d.root, f.partial, f.digest, f.content_crc, g.data
                             FROM files f JOIN drives d ON d.id = f.drive_id
                             LEFT JOIN flags g USING(drive_id, rel_path, zip_entry)
-                            WHERE f.digest <> '' AND f.drive_id <> ? AND f.size IN ({placeholders})"""
-                for row in db.execute(query, (current_drive_id, *batch)):
-                    rel, entry, size, mtime, crc, stamp, drive, label, root, partial, digest, content_crc, data = row
+                            WHERE f.digest <> '' AND f.drive_id <> ? AND (? = '' OR d.serial <> ?)
+                            AND f.size IN ({placeholders})"""
+                for row in db.execute(query, (drive.id, drive.serial, drive.serial, *batch)):
+                    rel, entry, size, mtime, crc, stamp, drive_id, label, root, partial, digest, content_crc, data = row
                     item = Item(rel, size, mtime, entry, crc, stamp)
                     flag = Flag(**json.loads(data)) if data else None
                     status = flag.flag if flag and flag.matches(item) and flag.hash in ("", digest) else ""
-                    yield Record(item, drive, label, Path(root), partial, digest, content_crc, status)
+                    yield Record(item, drive_id, label, Path(root), partial, digest, content_crc, status)

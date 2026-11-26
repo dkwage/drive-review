@@ -26,6 +26,16 @@ def native_path(value):
     return Path("\\\\?\\" + path)
 
 
+def display_path(value):
+    path = os.fspath(value)
+    if sys.platform == "win32":
+        if path.startswith("\\\\?\\UNC\\"):
+            return "\\\\" + path[8:]
+        if path.startswith("\\\\?\\"):
+            return path[4:]
+    return path
+
+
 def relative_parts(value):
     path = PurePosixPath(value)
     parts = path.parts

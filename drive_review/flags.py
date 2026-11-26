@@ -78,7 +78,8 @@ def read_flags(path):
                 row["size"] = int(row["size"])
                 if row["size"] < 0:
                     raise ValueError("잘못된 크기")
-                row["mtime_iso"] = datetime.fromisoformat(row["mtime_iso"]).isoformat(timespec="microseconds")
+                row["mtime_iso"] = datetime.fromisoformat(row["mtime_iso"]).astimezone(
+                    timezone.utc).isoformat(timespec="microseconds")
                 flag = Flag(**row)
                 if flag.key in flags:
                     raise ValueError("중복 플래그")
@@ -94,19 +95,28 @@ class FlagStore:
         self.local_path = Path(data_dir) / f"flags-{drive.id}.csv"
 
     def load(self):
-        portable = safe_path(self.drive.root, f"{REVIEW_DIR}/flags.csv")
         try:
             local_time = self.local_path.stat().st_mtime_ns
         except FileNotFoundError:
             local_time = None
         try:
+            portable = safe_path(self.drive.root, f"{REVIEW_DIR}/flags.csv")
             portable_time = portable.stat().st_mtime_ns
         except FileNotFoundError:
+            portable_time = None
+        except PermissionError:
+            if local_time is None:
+                raise
             portable_time = None
         if local_time is not None and (portable_time is None or local_time >= portable_time):
             return read_flags(self.local_path), True
         if portable_time is not None:
-            return read_flags(portable), False
+            try:
+                return read_flags(portable), False
+            except PermissionError:
+                if local_time is None:
+                    raise
+                return read_flags(self.local_path), True
         return {}, False
 
     def save(self, flags):

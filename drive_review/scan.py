@@ -6,12 +6,12 @@ import stat
 from zipfile import BadZipFile, LargeZipFile
 
 from .items import Item
-from .paths import REVIEW_DIR, is_link, native_path
+from .paths import REVIEW_DIR, is_link, native_path, safe_path
 from .zipsource import list_zip
 
 JUNK_NAMES = {
     "$recycle.bin", "system volume information", ".trashes", ".spotlight-v100", ".fseventsd",
-    ".ds_store", "desktop.ini", "thumbs.db", "autorun.inf", "autorun.exe",
+    ".ds_store", "desktop.ini", "thumbs.db", "autorun.inf", "autorun.exe", "autorun.ico",
     "seagate dashboard installer", "seagate dashboard installer.exe", "seagate dashboard installer.dmg",
     "seagate setup.exe", "seagate setup.dmg", "start_here_win.exe", "start_here_mac.app",
     "start_here_mac.dmg", "seagate toolkit.exe", "seagate toolkit.dmg",
@@ -104,3 +104,41 @@ def scan(root, show_hidden=False, stop=None, progress=lambda count, path: None):
         raise OSError(f"원본 드라이브 연결이 끊겼습니다: {root}")
     progress(len(result.items), "")
     return result
+
+
+def flagged_items(root, flags, status, stop=None, *, include_entries=True):
+    """Resolve flagged paths even when the review grid is filtering out system files."""
+    by_path = {}
+    for flag in flags.values():
+        if flag.flag == status and (include_entries or not flag.zip_entry):
+            by_path.setdefault(flag.rel_path, []).append(flag)
+    items, errors = [], []
+    for relative, selected in by_path.items():
+        if stop is not None and stop.is_set():
+            raise InterruptedError("작업이 취소되었습니다.")
+        try:
+            path = safe_path(root, relative)
+            info = path.lstat()
+            if is_link(info) or not stat.S_ISREG(info.st_mode):
+                raise ValueError("일반 파일이 아닙니다.")
+        except (OSError, ValueError) as error:
+            errors.append(f"{relative}: {error}")
+            continue
+        item = Item(relative, info.st_size, info.st_mtime_ns)
+        found = {"": item}
+        if any(flag.zip_entry for flag in selected):
+            try:
+                members, _dirs = list_zip(path, item, stop)
+                found.update((member.zip_entry, member) for member in members)
+            except InterruptedError:
+                raise
+            except (OSError, BadZipFile, LargeZipFile, ValueError, NotImplementedError) as error:
+                errors.append(f"{relative}: {error}")
+        for flag in selected:
+            candidate = found.get(flag.zip_entry)
+            if candidate is not None and flag.matches(candidate):
+                items.append(candidate)
+            else:
+                label = f"{relative}::{flag.zip_entry}" if flag.zip_entry else relative
+                errors.append(f"검토 후 변경되었거나 없는 파일: {label}")
+    return items, errors

@@ -10,7 +10,7 @@ import tempfile
 from PIL import Image, ImageOps
 
 from .dupes import CHUNK, check_cancel
-from .paths import safe_path
+from .paths import display_path, safe_path
 from .thumbs_windows import shell_thumbnail
 from .zipsource import open_item
 
@@ -19,7 +19,10 @@ MAX_AUTO_MEMBER = 64 * 1024 * 1024
 
 def copy_for_view(root, item, directory, stop=None):
     # A viewer can only access a temporary copy, even if it supports editing.
-    output = safe_path(directory, item.name)
+    name = item.name
+    if sys.platform == "win32" and len(str(Path(directory) / name)) > 245:
+        name = "preview" + Path(name).suffix[:24]
+    output = safe_path(directory, name)
     with open_item(root, item) as source, output.open("xb") as target:
         while True:
             check_cancel(stop)
@@ -27,7 +30,7 @@ def copy_for_view(root, item, directory, stop=None):
             if not data:
                 break
             target.write(data)
-    return output
+    return Path(display_path(output))
 
 
 def _pillow(path, size):
@@ -65,6 +68,13 @@ def _thumbnail(path, item, size):
     return image
 
 
+def can_thumbnail(item):
+    if item.zip_entry:
+        return item.category in {"Image", "Video"} or item.name.lower().endswith(".pdf")
+    return (sys.platform == "win32" or item.category in {"Image", "Design"}
+            or (sys.platform == "darwin" and (item.category == "Video" or item.name.lower().endswith(".pdf"))))
+
+
 class ThumbnailCache:
     def __init__(self, directory):
         self.directory = Path(directory)
@@ -75,10 +85,10 @@ class ThumbnailCache:
         return hashlib.blake2b(signature, digest_size=24).hexdigest()
 
     def get(self, drive, item, size, *, explicit=False, stop=None):
+        if not can_thumbnail(item):
+            return None
         if item.zip_entry:
             if item.category == "Video" and not explicit:
-                return None
-            if item.category not in {"Image", "Video"} and not item.name.lower().endswith(".pdf"):
                 return None
             if item.size > MAX_AUTO_MEMBER and not explicit:
                 return None

@@ -4,10 +4,11 @@ from collections import Counter
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
+import shutil
 from sqlite3 import Error as SQLiteError
 import tempfile
 
-from PySide6.QtCore import QItemSelectionModel, QSettings, QThreadPool, QTimer, Qt, QUrl
+from PySide6.QtCore import QItemSelectionModel, QSettings, QSignalBlocker, QThreadPool, QTimer, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
@@ -22,8 +23,8 @@ from ..flags import Flag, FlagStore
 from ..index import Index
 from ..items import CATEGORY_LABELS, bytes_label
 from ..paths import local_data_dir
-from ..quarantine import quarantine_items, undo_quarantine
-from ..scan import scan
+from ..quarantine import MoveResult, quarantine_items, undo_quarantine
+from ..scan import flagged_items, scan
 from ..thumbs import ThumbnailCache, copy_for_view
 from .grid import ReviewDelegate, ThumbnailQueue
 from .models import FOLDER, ITEM, FolderModel, ReviewModel
@@ -150,6 +151,7 @@ class MainWindow(QMainWindow):
         title.setContentsMargins(17, 10, 17, 10)
         brand = QLabel("Drive Review", objectName="brand")
         self.source = QLabel("검토할 드라이브 또는 폴더를 선택하세요", objectName="source")
+        self.source.setTextFormat(Qt.TextFormat.PlainText)
         self.drive_picker = self._combo([("외장 드라이브 선택", None)])
         self.drive_picker.setMinimumWidth(165)
         self.drive_picker.activated.connect(self._choose_drive)
@@ -222,6 +224,7 @@ class MainWindow(QMainWindow):
         notices = QHBoxLayout(self.notice)
         notices.setContentsMargins(15, 4, 15, 4)
         self.notice_text = QLabel(objectName="noticeText")
+        self.notice_text.setTextFormat(Qt.TextFormat.PlainText)
         self.notice_text.setWordWrap(True)
         self.details = self._button("상세 정보", self.show_details)
         notices.addWidget(self.notice_text, 1)
@@ -276,6 +279,7 @@ class MainWindow(QMainWindow):
         self.model = ReviewModel(self.grid)
         self.grid.setModel(self.model)
         self.thumbnails = ThumbnailQueue(ThumbnailCache(self.data_dir / "thumbs"), self.grid)
+        self.thumbnails.idle.connect(self._thumbnail_idle)
         self.delegate = ReviewDelegate(self.thumbnails, self.grid)
         self.grid.setItemDelegate(self.delegate)
         self._resize_thumbs(self.thumb_size.value())
@@ -326,8 +330,8 @@ class MainWindow(QMainWindow):
         self.messages = list(messages)
         if self.local_flags_path is not None:
             self.messages.insert(0, f"드라이브에 저장할 수 없어 플래그를 이 컴퓨터에 보관했습니다. {self.local_flags_path}")
-        self.notice_text.setText(self.messages[0] if self.messages else "")
-        self.details.setVisible(bool(self.messages) and (len(self.messages) > 1 or len(self.messages[0]) > 100))
+        self.notice_text.setText(" · ".join(self.messages[:2]))
+        self.details.setVisible(len(self.messages) > 1)
         self.notice.setVisible(bool(self.messages))
 
     def show_details(self):
@@ -335,6 +339,7 @@ class MainWindow(QMainWindow):
         if len(self.messages) > len(shown):
             shown.append(f"외 {len(self.messages) - len(shown):,}건")
         dialog = QMessageBox(QMessageBox.Icon.Information, "상세 정보", self.messages[0], parent=self)
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
         dialog.setDetailedText("\n".join(shown))
         dialog.exec()
 
@@ -429,7 +434,7 @@ class MainWindow(QMainWindow):
             return
         self._after_flags_saved(lambda: self._scan_root(path))
 
-    def _scan_root(self, path):
+    def _scan_root(self, path, messages=()):
         show_hidden = self.show_hidden.isChecked()
 
         def collect(stop, progress):
@@ -454,23 +459,24 @@ class MainWindow(QMainWindow):
             self.model.items = result.items
             self.groups = []
             self.model.duplicates = {}
-            self.model.flags = {item.key: flag.flag for item in result.items
+            self.model.flag_states = {item.key: flag.flag for item in result.items
                                 if (flag := self._current_flag(item)) is not None}
             self.thumbnails.set_drive(self.drive)
             self.folder = ""
-            self.folder_model.rebuild(result.directories, result.archives)
-            root = self.folder_model.index(0, 0)
-            self.tree.expand(root)
-            self.tree.setCurrentIndex(root)
+            with QSignalBlocker(self.tree.selectionModel()):
+                self.folder_model.rebuild(result.directories, result.archives)
+                root = self.folder_model.index(0, 0)
+                self.tree.expand(root)
+                self.tree.setCurrentIndex(root)
             self._apply_filter()
             self._update_summary()
-            messages = []
+            notices = list(messages)
             if result.errors:
-                messages = [f"스캔 중 확인이 필요한 항목 {len(result.errors):,}개", *result.errors]
-            stale = sum(1 for item in result.items if item.key in self.flags and item.key not in self.model.flags)
+                notices.extend([f"스캔 중 확인이 필요한 항목 {len(result.errors):,}개", *result.errors])
+            stale = sum(1 for item in result.items if item.key in self.flags and item.key not in self.model.flag_states)
             if stale:
-                messages.append(f"검토 이후 변경되어 플래그를 다시 확인해야 하는 파일 {stale:,}개")
-            self._set_notice(messages)
+                notices.append(f"검토 이후 변경되어 플래그를 다시 확인해야 하는 파일 {stale:,}개")
+            self._set_notice(notices)
             self.grid.setFocus()
 
         self._run("스캔 중", collect, loaded, self._scan_progress)
@@ -507,7 +513,7 @@ class MainWindow(QMainWindow):
         count = Counter()
         sizes = Counter()
         for item in self.model.items:
-            flag = self.model.flags.get(item.key, "none")
+            flag = self.model.flag_states.get(item.key, "none")
             for key in (flag, "duplicate") if item.key in self.model.duplicates else (flag,):
                 count[key] += 1
                 sizes[key] += item.size
@@ -538,10 +544,10 @@ class MainWindow(QMainWindow):
             if flag:
                 self.flags[item.key] = Flag.for_item(item, flag, "manual", self.reviewer.text().strip(),
                                                      self.hashes.get(item.key, ""))
-                self.model.flags[item.key] = flag
+                self.model.flag_states[item.key] = flag
                 keys.append(item.key)
             elif self.flags.pop(item.key, None) is not None:
-                self.model.flags.pop(item.key, None)
+                self.model.flag_states.pop(item.key, None)
                 keys.append(item.key)
         if keys:
             if self.flag_filter.currentData() in {"none", "green", "red"}:
@@ -640,7 +646,7 @@ class MainWindow(QMainWindow):
                 if flag and not flag.hash and flag.matches(by_key[key]):
                     self.flags[key] = replace(flag, hash=digest)
                     changed = True
-            self.model.flags = {item.key: flag.flag for item in items
+            self.model.flag_states = {item.key: flag.flag for item in items
                                 if (flag := self._current_flag(item)) is not None}
             self.model.duplicates = duplicates
             self._apply_filter()
@@ -672,7 +678,7 @@ class MainWindow(QMainWindow):
                                       f"{len(group.records):,}개"])
             tree.addTopLevelItem(parent)
             for record in group.records:
-                status = self.model.flags.get(record.item.key, "") if record.drive_id == self.drive.id else record.flag
+                status = self.model.flag_states.get(record.item.key, "") if record.drive_id == self.drive.id else record.flag
                 labels = {"green": "업로드", "red": "격리"}
                 details = [labels[status]] if status else []
                 if record is group.keeper:
@@ -744,7 +750,11 @@ class MainWindow(QMainWindow):
 
         def copy(stop, _report):
             directory = tempfile.mkdtemp(dir=self.viewer_files.name)
-            return copy_for_view(root, item, directory, stop)
+            try:
+                return copy_for_view(root, item, directory, stop)
+            except Exception:
+                shutil.rmtree(directory, ignore_errors=True)
+                raise
 
         def display(path):
             if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
@@ -755,21 +765,39 @@ class MainWindow(QMainWindow):
     def confirm_quarantine(self):
         if self._busy() or self.drive is None:
             return
-        items = [item for item in self.model.items
-                 if not item.zip_entry and self.model.flags.get(item.key) == "red"]
-        if not items:
-            self._set_notice(["격리할 일반 파일이 없습니다. ZIP 내부 항목은 이동 대상에서 제외됩니다."])
-            return
-        answer = QMessageBox.question(self, "빨간 파일 격리",
-                                      f"{len(items):,}개 파일 ({bytes_label(sum(item.size for item in items))})을 "
-                                      f"_drive_review/quarantine으로 옮길까요?",
-                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                      QMessageBox.StandardButton.No)
-        if answer == QMessageBox.StandardButton.Yes:
-            root = self.drive.root
-            self._after_flags_saved(lambda: self._run(
-                "격리 중", lambda stop, report: quarantine_items(root, items, stop, report),
-                partial(self._moved, "격리"), self._work_progress))
+        root = self.drive.root
+        flags, hashes = dict(self.flags), dict(self.hashes)
+
+        def collect(stop, _report):
+            items, errors = flagged_items(root, flags, "red", stop, include_entries=False)
+            eligible = []
+            for item in items:
+                if flags[item.key].hash in ("", hashes.get(item.key, flags[item.key].hash)):
+                    eligible.append(item)
+                else:
+                    errors.append(f"검토 후 내용이 변경된 파일: {item.identity}")
+            return eligible, errors
+
+        def confirm(result):
+            items, errors = result
+            if not items:
+                self._set_notice(["격리할 일반 파일이 없습니다. ZIP 내부 항목은 이동 대상에서 제외됩니다.", *errors])
+                return
+            message = (f"{len(items):,}개 파일 ({bytes_label(sum(item.size for item in items))})을 "
+                       "_drive_review/quarantine으로 옮길까요?")
+            if errors:
+                message += f"\n이동할 수 없는 경로 {len(errors):,}개를 건너뜁니다."
+            answer = QMessageBox.question(self, "빨간 파일 격리", message,
+                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                          QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                def move(stop, report):
+                    result = quarantine_items(root, items, stop, report)
+                    return MoveResult(result.moved, result.size, errors + result.errors)
+
+                self._run("격리 중", move, partial(self._moved, "격리"), self._work_progress)
+
+        self._after_flags_saved(lambda: self._run("격리 대상 확인", collect, confirm))
 
     def confirm_undo(self):
         if self._busy() or self.drive is None:
@@ -796,10 +824,20 @@ class MainWindow(QMainWindow):
         destination = QFileDialog.getExistingDirectory(self, "업로드 세트를 저장할 로컬 폴더")
         if destination:
             root = self.drive.root
-            items, flags = list(self.model.items), dict(self.flags)
+            flags = dict(self.flags)
+
+            def prepare(stop, report):
+                items, errors = flagged_items(root, flags, "green", stop)
+                if not items and errors:
+                    return [f"업로드할 수 있는 파일이 없습니다. 확인 대상 {len(errors):,}개", *errors]
+                path = prepare_upload(root, destination, items, flags, stop, report)
+                notice = f"업로드 세트 저장 완료 · {path}"
+                if errors:
+                    notice += f" · 건너뛴 경로 {len(errors):,}개"
+                return [notice, *errors]
+
             self._after_flags_saved(lambda: self._run(
-                "업로드 세트 준비", lambda stop, report: prepare_upload(root, destination, items, flags, stop, report),
-                lambda path: self._set_notice([f"업로드 세트 저장 완료 · {path}"]), self._work_progress))
+                "업로드 세트 준비", prepare, self._set_notice, self._work_progress))
 
     def choose_inventory(self):
         if self._busy() or self.drive is None:
@@ -829,5 +867,12 @@ class MainWindow(QMainWindow):
             event.ignore()
         else:
             self.thumbnails.cancel()
+            if self.thumbnails.pending:
+                event.ignore()
+                return
             self.settings.sync()
             event.accept()
+
+    def _thumbnail_idle(self):
+        if self.closing:
+            self.close()

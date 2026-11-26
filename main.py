@@ -3,6 +3,7 @@
 import argparse
 import sys
 
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from drive_review.ui.window import MainWindow
@@ -17,6 +18,8 @@ def main():
     app = QApplication([sys.argv[0]])
     app.setApplicationName("Drive Review")
     app.setStyle("Fusion")
+    if sys.platform == "darwin":
+        app.setFont(QFont("Helvetica Neue", 13))
     try:
         window = MainWindow(args.data_dir, list_drives=args.folder is None)
     except Exception as error:
