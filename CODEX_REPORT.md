@@ -28,4 +28,4 @@ The available host was macOS. Native testing remains for Windows Shell thumbnail
 - The first duplicate pass streams all reviewable items to build a cross-drive baseline. An offline drive's cached match reflects its last scan. With byte comparison enabled, an unavailable drive is ineligible to supply the keeper for an automatic red flag.
 - ZIP listing validates the central directory. Damage confined to the compressed payload can surface later when the affected entry is read. Automated ZIP thumbnails are limited to 64 MiB per member, and ZIP video thumbnail extraction requires an explicit preview.
 - Opening a file in its default app uses a local temporary copy. Large files need corresponding local free space. The on-disk thumbnail cache has no automatic eviction.
-- The workspace marks `.git` read-only. The changes are in the workspace, and the conventional commits were made in a writable local clone and bundled at `/private/tmp/DriveReview-v1.bundle`.
+- The workspace marks `.git` read-only. The changes are in the workspace, and the conventional commits were made in a writable local clone.

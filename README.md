@@ -4,7 +4,9 @@
 
 ## 시작하기
 
-Windows 빌드의 `DriveReview-windows` 압축 파일을 풀고 `DriveReview.exe`를 실행합니다. 실행 파일과 함께 제공되는 폴더를 같은 위치에 둡니다.
+[![Windows용 다운로드](https://img.shields.io/badge/Download-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/dkwage/drive-review/releases/latest/download/DriveReview-Windows.zip)
+
+`DriveReview-Windows.zip`을 풀고 `DriveReview` 폴더 안의 `DriveReview.exe`를 실행합니다. 폴더 안의 다른 파일도 함께 두어야 합니다. 서명되지 않은 앱이라 처음 실행할 때 "Windows의 PC 보호" 창이 뜨면 **추가 정보** → **실행**을 누릅니다.
 
 1. 위쪽 목록에서 외장 드라이브를 선택하거나 **폴더 열기**를 누릅니다. 방금 연결한 드라이브는 **새로 고침**으로 찾을 수 있습니다.
 2. 검토자 이름을 입력합니다. 폴더 트리에서 ZIP을 펼치면 압축을 풀지 않고 내부 파일을 살펴볼 수 있습니다.
