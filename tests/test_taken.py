@@ -198,7 +198,7 @@ class CaptureCacheTests(unittest.TestCase):
             (root / "photo.jpg").write_bytes(photo(camera=True))
             drive = identify_drive(root)
             items = scan(root).items
-            with connect(path) as old:
+            with closing(connect(path)) as old, old:
                 old.execute("""CREATE TABLE capture_dates (
                     drive_id TEXT, rel_path TEXT, zip_entry TEXT, stamp TEXT, text TEXT,
                     utc_offset TEXT, sort_key INTEGER, PRIMARY KEY (drive_id, rel_path, zip_entry, stamp))""")
