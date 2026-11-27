@@ -9,10 +9,11 @@ from pathlib import Path
 import tempfile
 
 from .items import iso_mtime
+from .pairs import CHOICES
 from .paths import REVIEW_DIR, relative_parts, safe_path
 
 FLAG_COLUMNS = ("rel_path", "zip_entry", "flag", "reason", "size", "mtime_iso", "hash",
-                "category", "reviewer", "flagged_at_iso")
+                "category", "reviewer", "flagged_at_iso", "pair_choice")
 
 
 def atomic_csv(path, columns, rows, *, bom=True):
@@ -45,15 +46,16 @@ class Flag:
     category: str
     reviewer: str
     flagged_at_iso: str
+    pair_choice: str = ""
 
     @property
     def key(self):
         return self.rel_path, self.zip_entry
 
     @classmethod
-    def for_item(cls, item, flag, reason, reviewer, digest=""):
+    def for_item(cls, item, flag, reason, reviewer, digest="", *, pair_choice=""):
         return cls(item.rel_path, item.zip_entry, flag, reason, item.size, iso_mtime(item.mtime_ns),
-                   digest, item.category, reviewer, datetime.now(timezone.utc).isoformat())
+                   digest, item.category, reviewer, datetime.now(timezone.utc).isoformat(), pair_choice)
 
     def matches(self, item):
         return (self.size == item.size and self.mtime_iso == iso_mtime(item.mtime_ns)
@@ -64,11 +66,13 @@ def read_flags(path):
     flags = {}
     with Path(path).open(encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
-        if reader.fieldnames != list(FLAG_COLUMNS):
+        if tuple(reader.fieldnames or ()) not in (FLAG_COLUMNS, FLAG_COLUMNS[:-1]):
             raise ValueError(f"Invalid flags.csv columns: {path}")
         for row in reader:
             try:
-                if None in row or None in row.values() or row["flag"] not in {"green", "red"}:
+                choice = row.get("pair_choice", "")
+                if (None in row or None in row.values() or choice not in ("", *CHOICES)
+                        or row["flag"] not in {"green", "red"}):
                     raise ValueError("Invalid flag")
                 relative_parts(row["rel_path"])
                 if row["rel_path"].split("/", 1)[0].casefold() == REVIEW_DIR:

@@ -7,6 +7,7 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle
 
 from ..items import CATEGORY_LABELS, bytes_label
+from ..pairs import CHOICE_LABELS
 from ..thumbs import MAX_AUTO_MEMBER, ThumbnailCache, can_thumbnail
 from .models import ITEM
 from .workers import Worker
@@ -130,8 +131,9 @@ class ReviewDelegate(QStyledItemDelegate):
             painter.drawText(icon, Qt.AlignmentFlag.AlignCenter, CATEGORY_LABELS[item.category])
 
         model = index.model()
-        flag = model.flag_states.get(item.key)
-        duplicate = model.duplicates.get(item.key)
+        pair = model.pair_for(item)
+        flag = model.flag_for(item)
+        duplicate = model.duplicate_for(item)
         chips = []
         if flag:
             chips.append(("✓", "#087654") if flag == "green" else ("✕", "#B43C38"))
@@ -141,11 +143,11 @@ class ReviewDelegate(QStyledItemDelegate):
             chips.append(("!", "#8B5C1A"))
         for i, (text, color) in enumerate(chips):
             badge = QRect(thumb.right() - 25 - i * 25, thumb.y() + 5, 22, 22)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(color))
-            painter.drawRoundedRect(badge, 5, 5)
-            painter.setPen(QColor("#FFFFFF"))
-            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, text)
+            self.draw_badge(painter, badge, text, color)
+        if pair:
+            width = painter.fontMetrics().horizontalAdvance("RAW+JPG") + 12
+            badge = QRect(thumb.x() + 5, thumb.bottom() - 26, width, 22)
+            self.draw_badge(painter, badge, "RAW+JPG", "#305C56")
 
         painter.setPen(fg)
         font = QFont(option.font)
@@ -158,8 +160,18 @@ class ReviewDelegate(QStyledItemDelegate):
         painter.setPen(QColor("#53635F"))
         subtitle = QRect(name.x(), name.bottom(), name.width(), 20)
         subtitle_text = bytes_label(item.size)
+        if pair and flag == "green":
+            subtitle_text = f"↑ {CHOICE_LABELS[model.pair_choices[pair.jpg.key]]} · {subtitle_text}"
         if duplicate:
             subtitle_text += f" · {duplicate}"
         painter.drawText(subtitle, Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(
             subtitle_text, Qt.TextElideMode.ElideRight, subtitle.width()))
         painter.restore()
+
+    @staticmethod
+    def draw_badge(painter, rect, text, color):
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawRoundedRect(rect, 5, 5)
+        painter.setPen(QColor("#FFFFFF"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)

@@ -48,3 +48,22 @@ OK
 - The existing 29 tests passed on macOS arm64 with Python 3.12.16 in the existing uv-managed `.venv`. Added 13 tests for metadata parsing, the read cap, ZIP members, cache migration and invalidation, cancellation and resume, and offscreen Quick Look and sorting. The inventory test also checks the position and content of the **Taken** column.
 - Spot checks returned capture dates for CR2, CR3, DNG, NEF, RAF, RW2, and MOV samples. The automated tests generate JPEG, PNG, HEIF, and, where the Pillow encoders are available, WebP and AVIF fixtures. [ExifTool sample files](https://github.com/exiftool/exiftool/tree/master/t/images)
 - The 4 MiB read budget permits seeking past large payloads in loose files. For ZIP entries and other sequential streams, the reader can only reach metadata in the first 4 MiB. Native Windows verification remains pending.
+
+## v4 RAW+JPG pairs
+
+Drive Review groups an unambiguous RAW and JPG, JPEG, HEIC, or HEIF in the same folder after matching the case-insensitive base name and capture metadata. It compares UTC seconds when both offsets are available and recorded wall-clock seconds otherwise. Available subsecond and camera fields must agree when recorded by both files. The SQLite migration refreshes old capture records once to collect those fields.
+
+Grouped tiles preserve selection and manual flags when capture dates arrive. They use the rendered image for both the thumbnail and Quick Look. **R** cycles upload choices for the selection, and Quick Look can set the current pair's choice directly. Duplicate searches resolve candidate metadata before applying automatic Delete flags. Confirmed pairs show those suggestions on the tile and retain their upload choice.
+
+`flags.csv` appends `pair_choice` while keeping one row per flagged file. Older CSVs load and infer the choice from green flags. After **C** removes both rows, the local index remembers the pair's choice on the same computer.
+
+```text
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -v
+Ran 54 tests in 4.028s
+
+OK
+```
+
+- All 42 baseline tests and 12 new tests passed on macOS 27.0.1 arm64 with Python 3.12.16 in the existing uv-managed `.venv`.
+- Added coverage for pairing rules and ZIP boundaries, EXIF tags and SQLite migration, legacy and current CSVs, selection across merges, thumbnail and badge text, Quick Look, multi-selection shortcuts, filters and counts, remembered grouping, and duplicate and quarantine behavior while capture dates are pending.
+- Native Windows UI and standalone RS Uploader verification remain pending.

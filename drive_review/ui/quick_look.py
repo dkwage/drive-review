@@ -10,12 +10,13 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QGraphicsItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel,
+    QApplication, QButtonGroup, QDialog, QGraphicsItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel,
     QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider, QStackedWidget, QStyle,
     QVBoxLayout, QWidget,
 )
 
 from ..items import bytes_label, date_label
+from ..pairs import CHOICE_LABELS
 from ..paths import display_path
 from ..preview import PreviewKind, load_preview
 from ..preview_windows import show_handler
@@ -174,6 +175,7 @@ class MediaView(QWidget):
 class QuickLook(QDialog):
     navigate = Signal(object)
     flag_requested = Signal(str)
+    choice_requested = Signal(str)
     open_requested = Signal(object)
     idle = Signal()
 
@@ -252,6 +254,33 @@ class QuickLook(QDialog):
         for view in (self.message_page, self.image, self.text, self.pdf):
             self.stack.addWidget(view)
 
+        self.pair_controls = QWidget()
+        pair_footer = QHBoxLayout(self.pair_controls)
+        pair_footer.setContentsMargins(0, 0, 0, 0)
+        pair_footer.addStretch()
+        pair_footer.addWidget(self.label("Upload:"))
+        segments = QHBoxLayout()
+        segments.setSpacing(0)
+        self.choice_buttons = {}
+        self.choice_group = QButtonGroup(self.pair_controls)
+        for choice, label in CHOICE_LABELS.items():
+            button = QPushButton(label, checkable=True, autoDefault=False, objectName=choice)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.clicked.connect(partial(self.choice_requested.emit, choice))
+            self.choice_group.addButton(button)
+            self.choice_buttons[choice] = button
+            segments.addWidget(button)
+        self.pair_controls.setStyleSheet("""
+            QPushButton { border-radius: 0; }
+            QPushButton#jpg { border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
+            QPushButton#both { border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
+            QPushButton:checked { background: #DCEFE6; border-color: #25806C; }
+        """)
+        pair_footer.addLayout(segments)
+        pair_footer.addWidget(self.label("R choose RAW/JPG"))
+        layout.addWidget(self.pair_controls)
+        self.pair_controls.hide()
+
         footer = QHBoxLayout()
         self.page_count = self.label()
         self.fit = QPushButton("Fit")
@@ -310,6 +339,11 @@ class QuickLook(QDialog):
         self.position.setText(f"{position:,} / {count:,}" if item else "")
         self.flag.setText({"green": "Upload", "red": "Delete"}.get(flag, "Unflagged") if item else "")
         self.flag.setStyleSheet({"green": "color: #176440", "red": "color: #9A3734"}.get(flag, ""))
+
+    def set_pair_choice(self, choice):
+        if choice:
+            self.choice_buttons[choice].setChecked(True)
+        self.pair_controls.setVisible(bool(choice))
 
     def set_taken(self, taken):
         if self.item is None:
@@ -475,6 +509,8 @@ class QuickLook(QDialog):
             return partial(self.navigate.emit, key)
         if key in FLAGS:
             return partial(self.flag_requested.emit, FLAGS[key])
+        if key == Qt.Key.Key_R:
+            return partial(self.choice_requested.emit, "")
         if key == Qt.Key.Key_K and self.stack.currentWidget() is self.media:
             return self.media.toggle
         if key in ZOOM_IN | {Qt.Key.Key_Minus} and self.stack.currentWidget() is self.image:

@@ -13,16 +13,28 @@ from zipfile import ZipFile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
-from PySide6.QtCore import QEventLoop, QItemSelection, QItemSelectionModel, QTimer, Qt
-from PySide6.QtGui import QFont, QPainter, QPdfWriter
+from PySide6.QtCore import QEventLoop, QItemSelection, QItemSelectionModel, QRect, QTimer, Qt
+from PySide6.QtGui import QFont, QImage, QPainter, QPdfWriter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit, QMessageBox, QStyleOptionViewItem
 
 from drive_review.capture import read_item_taken
-from drive_review.flags import read_flags
+from drive_review.drives import identify_drive
+from drive_review.flags import Flag, FlagStore, read_flags
+from drive_review.items import bytes_label
 from drive_review.quarantine import QUARANTINE, quarantine_items
-from drive_review.scan import scan
+from drive_review.scan import flagged_items, scan
 from drive_review.ui.window import MainWindow
+
+
+def write_pair(folder, stem):
+    fields = {0x9003: "2024:04:05 19:38:52", 0x9291: "032", 0x010F: "Canon", 0x0110: "EOS R6"}
+    Image.new("RGB", (8, 8), "red").save(folder / f"{stem}.CR2", format="TIFF", tiffinfo=fields)
+    jpg = Image.new("RGB", (20, 10), "blue")
+    exif = jpg.getexif()
+    exif[0x010F], exif[0x0110] = fields[0x010F], fields[0x0110]
+    exif[0x8769] = {0x9003: fields[0x9003], 0x9291: fields[0x9291]}
+    jpg.save(folder / f"{stem}.JPG", exif=exif)
 
 
 class ReviewSmokeTests(unittest.TestCase):
@@ -301,6 +313,230 @@ class ReviewSmokeTests(unittest.TestCase):
                 release.set()
                 window.close()
                 self.wait_until(lambda: not window.isVisible())
+
+    def test_pairs_merge_during_capture_and_keep_selection_and_flags(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "drive"
+            root.mkdir()
+            write_pair(root, "a")
+            write_pair(root, "b")
+            (root / "notes.txt").write_text("notes")
+            raw_a, jpg_a, raw_b, jpg_b = [(name, "") for name in ("a.CR2", "a.JPG", "b.CR2", "b.JPG")]
+            entered, release = Event(), Event()
+
+            def hold_first(reader, source, item):
+                if item.key == raw_a:
+                    entered.set()
+                    if not release.wait(8):
+                        raise TimeoutError("Capture date worker was not released")
+                return read_item_taken(reader, source, item)
+
+            window = MainWindow(base / "local", list_drives=False)
+            window.show()
+            preview = window.quick_look
+            try:
+                with patch("drive_review.capture.read_item_taken", side_effect=hold_first):
+                    window.open_root(root)
+                    self.wait_until(entered.is_set)
+                    self.assertEqual(window.model.rowCount(), 5)
+                    selection = window.grid.selectionModel()
+                    selection.setCurrentIndex(window.model.index(window.model.rows[raw_a]),
+                                              QItemSelectionModel.SelectionFlag.ClearAndSelect)
+                    QTest.keyClick(window.grid, Qt.Key.Key_Z)
+                    for key in (raw_b, jpg_b, ("notes.txt", "")):
+                        selection.select(window.model.index(window.model.rows[key]),
+                                         QItemSelectionModel.SelectionFlag.Select)
+                    window.preview_selected()
+                    self.assertEqual(preview.item.key, raw_a)
+                    self.assertTrue(preview.pair_controls.isHidden())
+                    release.set()
+                    self.wait_until(lambda: window.capture_pass is None and window.model.rowCount() == 3)
+
+                self.assertEqual(window.visible_count.text(), "3 files")
+                self.assertEqual(window.model.rows[raw_a], window.model.rows[jpg_a])
+                self.assertEqual(window.model.rows[raw_b], window.model.rows[jpg_b])
+                self.assertEqual(window.grid.currentIndex().data(), "a.JPG")
+                self.assertEqual({item.key for item in window._selected_items()}, {jpg_a, jpg_b, ("notes.txt", "")})
+                self.assertEqual(window.model.flag_states, {raw_a: "green"})
+                self.assertIn(f"Upload 1 ({bytes_label((root / 'a.CR2').stat().st_size)})", window.summary.text())
+                self.assertEqual(preview.item.key, jpg_a)
+                self.wait_until(lambda: preview.stack.currentWidget() is preview.image)
+                bounds = preview.image.scene().sceneRect()
+                self.assertEqual((bounds.width(), bounds.height()), (20, 10))
+                self.assertTrue(preview.pair_controls.isVisible())
+                self.assertEqual([button.text() for button in preview.choice_buttons.values()], ["JPG", "RAW", "RAW+JPG"])
+                self.assertTrue(preview.choice_buttons["raw"].isChecked())
+                self.assertTrue(all(button.focusPolicy() == Qt.FocusPolicy.NoFocus
+                                    for button in preview.choice_buttons.values()))
+
+                index = window.grid.currentIndex()
+                tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
+                for name in ("a.CR2", "a.JPG"):
+                    self.assertIn(f"{name} · {bytes_label((root / name).stat().st_size)}", tooltip)
+                self.assertIn("Upload choice · RAW", tooltip)
+                option = QStyleOptionViewItem()
+                option.rect = QRect(0, 0, 180, 222)
+                surface = QImage(180, 222, QImage.Format.Format_RGB32)
+                painter = QPainter(surface)
+                try:
+                    with patch.object(window.delegate, "draw_badge", wraps=window.delegate.draw_badge) as badge, \
+                            patch.object(window.thumbnails, "request", return_value=None) as thumbnail, \
+                            patch.object(painter, "drawText", wraps=painter.drawText) as drawn:
+                        window.delegate.paint(painter, option, index)
+                    self.assertIn("RAW+JPG", [call.args[2] for call in badge.call_args_list])
+                    self.assertEqual(thumbnail.call_args.args[0].key, jpg_a)
+                    self.assertTrue(any(call.args[2].startswith("↑ RAW") for call in drawn.call_args_list))
+                finally:
+                    painter.end()
+            finally:
+                release.set()
+                window.close()
+                self.wait_until(lambda: not window.isVisible())
+
+    def test_pair_keyboard_controls_filters_and_settings(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "drive"
+            root.mkdir()
+            for stem in ("a", "b"):
+                write_pair(root, stem)
+            (root / "notes.txt").touch()
+            raw_a, jpg_a, raw_b, jpg_b = [(name, "") for name in ("a.CR2", "a.JPG", "b.CR2", "b.JPG")]
+            path = root / "_drive_review" / "flags.csv"
+            window = MainWindow(base / "local", list_drives=False)
+            window.show()
+            try:
+                window.open_root(root)
+                self.wait_until(lambda: not window._busy() and window.capture_pass is None)
+                self.assertTrue(window.group_pairs.isChecked())
+                self.assertEqual(window.model.rowCount(), 3)
+                selection = window.grid.selectionModel()
+                selection.setCurrentIndex(window.model.index(window.model.rows[jpg_a]),
+                                          QItemSelectionModel.SelectionFlag.ClearAndSelect)
+                for key in (jpg_b, ("notes.txt", "")):
+                    selection.select(window.model.index(window.model.rows[key]), QItemSelectionModel.SelectionFlag.Select)
+
+                QTest.keyClick(window.grid, Qt.Key.Key_R)
+                self.assertEqual(window.model.flag_states, {raw_a: "green", raw_b: "green"})
+                window.preview_selected()
+                preview = window.quick_look
+                QTest.keyClick(preview, Qt.Key.Key_R)
+                self.assertEqual(window.model.flag_states, dict.fromkeys((raw_a, jpg_a, raw_b, jpg_b), "green"))
+                total = sum((root / key[0]).stat().st_size for key in (raw_a, jpg_a, raw_b, jpg_b))
+                self.assertIn(f"Upload 4 ({bytes_label(total)})", window.summary.text())
+                QTest.keyClick(preview, Qt.Key.Key_R)
+                self.assertEqual(window.model.flag_states, {jpg_a: "green", jpg_b: "green"})
+                QTest.mouseClick(preview.choice_buttons["raw"], Qt.MouseButton.LeftButton)
+                self.assertEqual(window.model.flag_states, {raw_a: "green", jpg_b: "green"})
+                QTest.keyClick(preview, Qt.Key.Key_X)
+                self.assertEqual(window.model.flag_states, {raw_a: "red", jpg_a: "red", jpg_b: "green"})
+                QTest.keyClick(preview, Qt.Key.Key_Z)
+                self.assertEqual(window.model.flag_states, {raw_a: "green", jpg_b: "green"})
+                QTest.keyClick(preview, Qt.Key.Key_C)
+                self.assertEqual(window.model.flag_states, {jpg_b: "green"})
+                self.assertTrue(preview.choice_buttons["raw"].isChecked())
+                preview.close()
+
+                window.category.setCurrentIndex(window.category.findData("Image"))
+                self.assertEqual(window.model.rowCount(), 2)
+                window.flag_filter.setCurrentIndex(window.flag_filter.findData("green"))
+                self.assertEqual(window.model.rowCount(), 1)
+                self.assertEqual(window.model.index(0).data(), "b.JPG")
+                window.flag_filter.setCurrentIndex(0)
+                window.search.setText("A.cr2")
+                self.wait_until(lambda: window.model.rowCount() == 1)
+                self.assertEqual(window.model.index(0).data(), "a.JPG")
+                window.search.clear()
+                window.group_pairs.trigger()
+                self.assertEqual(window.model.rowCount(), 4)
+                self.assertEqual(window.model.index(window.model.rows[raw_a]).data(), "a.CR2")
+            finally:
+                window.close()
+                self.wait_until(lambda: not window.isVisible())
+
+            saved = read_flags(path)
+            self.assertEqual({key: (flag.flag, flag.pair_choice) for key, flag in saved.items()},
+                             {jpg_b: ("green", "jpg")})
+            upload, errors = flagged_items(root, saved, "green")
+            self.assertEqual(([item.key for item in upload], errors), ([jpg_b], []))
+            reopened = MainWindow(base / "local", list_drives=False)
+            reopened.show()
+            try:
+                reopened.open_root(root)
+                self.wait_until(lambda: not reopened._busy())
+                self.assertFalse(reopened.group_pairs.isChecked())
+                self.assertEqual(reopened.model.rowCount(), 5)
+                reopened.group_pairs.trigger()
+                self.assertEqual(reopened.model.rowCount(), 3)
+                reopened.grid.setCurrentIndex(reopened.model.index(reopened.model.rows[jpg_a]))
+                QTest.keyClick(reopened.grid, Qt.Key.Key_Z)
+                self.assertEqual(reopened.model.flag_states, {raw_a: "green", jpg_b: "green"})
+            finally:
+                reopened.close()
+                self.wait_until(lambda: not reopened.isVisible())
+
+    def test_duplicate_suggestions_resolve_pair_metadata_before_auto_flagging(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "drive"
+            photos = root / "photos"
+            photos.mkdir(parents=True)
+            write_pair(photos, "scene")
+            (root / "copy.jpg").write_bytes((photos / "scene.JPG").read_bytes())
+            raw = next(item for item in scan(root).items if item.name.endswith(".CR2"))
+            jpg = ("photos/scene.JPG", "")
+            store = FlagStore(identify_drive(root), base / "local")
+            store.save({raw.key: Flag.for_item(raw, "green", "manual", "reviewer", pair_choice="raw")})
+            window = MainWindow(base / "local", list_drives=False)
+            window.show()
+            try:
+                with patch.object(window, "_start_capture_pass"):
+                    window.open_root(root)
+                    self.wait_until(lambda: not window._busy())
+                self.assertEqual(window.model.rowCount(), 3)
+                self.assertEqual(window.model.taken, {})
+                window.run_duplicates()
+                self.wait_until(lambda: bool(window.groups) and not window._busy())
+                self.assertEqual(window.model.flag_states, {raw.key: "green"})
+                self.assertIn(jpg, window.groups[0].suggestions)
+                self.assertEqual(window.model.pair_choices[jpg], "raw")
+                window.flag_filter.setCurrentIndex(window.flag_filter.findData("duplicate"))
+                self.assertEqual(window.model.rowCount(), 2)
+                index = window.model.index(window.model.rows[raw.key])
+                self.assertIn("Duplicate · Suggested Delete", index.data(Qt.ItemDataRole.ToolTipRole))
+                self.assertIn("0 automatic Delete flags", window.notice_text.text())
+            finally:
+                window.close()
+                self.wait_until(lambda: not window.isVisible())
+
+    def test_quarantine_protects_a_pending_pair_from_a_legacy_duplicate_flag(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "drive"
+            root.mkdir()
+            write_pair(root, "scene")
+            jpg = next(item for item in scan(root).items if item.name == "scene.JPG")
+            store = FlagStore(identify_drive(root), base / "local")
+            path, _ = store.save({jpg.key: Flag.for_item(jpg, "red", "duplicate", "reviewer")})
+            window = MainWindow(base / "local", list_drives=False)
+            window.show()
+            try:
+                with patch.object(window, "_start_capture_pass"):
+                    window.open_root(root)
+                    self.wait_until(lambda: not window._busy())
+                self.assertEqual(window.model.flag_states, {jpg.key: "red"})
+                with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as confirm:
+                    window.confirm_quarantine()
+                    self.wait_until(lambda: not window._busy())
+                    confirm.assert_not_called()
+                self.assertEqual(window.model.rowCount(), 1)
+                self.assertEqual(window.model.flag_states, {})
+                self.assertIn("Suggested Delete", window.model.index(0).data(Qt.ItemDataRole.ToolTipRole))
+            finally:
+                window.close()
+                self.wait_until(lambda: not window.isVisible())
+            self.assertEqual(read_flags(path), {})
 
     def test_owner_permanent_delete_requires_the_file_count(self):
         with TemporaryDirectory() as directory:

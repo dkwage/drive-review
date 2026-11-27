@@ -28,8 +28,14 @@ CREATE TABLE IF NOT EXISTS flags (
 );
 CREATE TABLE IF NOT EXISTS capture_dates (
   drive_id TEXT NOT NULL, rel_path TEXT NOT NULL, zip_entry TEXT NOT NULL, stamp TEXT NOT NULL,
-  text TEXT, utc_offset TEXT, sort_key INTEGER,
+  text TEXT, utc_offset TEXT, sort_key INTEGER, subsec TEXT, make TEXT, model TEXT,
   PRIMARY KEY (drive_id, rel_path, zip_entry, stamp)
+);
+CREATE TABLE IF NOT EXISTS cleared_pair_choices (
+  drive_id TEXT NOT NULL, raw_path TEXT NOT NULL, raw_entry TEXT NOT NULL,
+  jpg_path TEXT NOT NULL, jpg_entry TEXT NOT NULL, raw_stamp TEXT NOT NULL, jpg_stamp TEXT NOT NULL,
+  choice TEXT NOT NULL,
+  PRIMARY KEY (drive_id, raw_path, raw_entry, jpg_path, jpg_entry, raw_stamp, jpg_stamp)
 );
 """
 
@@ -53,6 +59,14 @@ class Index:
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(capture_dates)")}
+            missing = {"subsec", "make", "model"} - columns
+            if missing:
+                for column in sorted(missing):
+                    db.execute(f"ALTER TABLE capture_dates ADD COLUMN {column} TEXT")
+                # A legacy date was read without camera tags. Re-read it before pairing.
+                db.execute("DELETE FROM capture_dates")
 
     @contextmanager
     def connect(self):
@@ -89,13 +103,23 @@ class Index:
                                 if (rel, entry) not in present
                                 and (show_hidden or not (is_junk(rel) or is_junk(entry)))])
 
-    def replace_flags(self, drive, flags):
+    def replace_flags(self, drive, flags, *, cleared_choices=None):
         with self.connect() as db:
             self._register(db, drive)
             db.execute("DELETE FROM flags WHERE drive_id = ?", (drive.id,))
             db.executemany("INSERT INTO flags VALUES (?, ?, ?, ?)", [
                 (drive.id, *flag.key, json.dumps(asdict(flag), ensure_ascii=False)) for flag in flags.values()
             ])
+            if cleared_choices is not None:
+                db.execute("DELETE FROM cleared_pair_choices WHERE drive_id = ?", (drive.id,))
+                db.executemany("INSERT INTO cleared_pair_choices VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                               [(drive.id, *stamp, choice) for stamp, choice in cleared_choices.items()])
+
+    def cleared_pair_choices(self, drive_id):
+        with self.connect() as db:
+            rows = db.execute("""SELECT raw_path, raw_entry, jpg_path, jpg_entry, raw_stamp, jpg_stamp, choice
+                                 FROM cleared_pair_choices WHERE drive_id = ?""", (drive_id,))
+            return {tuple(stamp): choice for *stamp, choice in rows}
 
     def cached(self, drive_id):
         with self.connect() as db:
@@ -115,16 +139,19 @@ class Index:
     def cached_dates(self, drive_id, items):
         stamps = {item.key: item.stamp for item in items}
         with self.connect() as db:
-            rows = db.execute("""SELECT rel_path, zip_entry, stamp, text, utc_offset, sort_key
+            rows = db.execute("""SELECT rel_path, zip_entry, stamp, text, utc_offset, sort_key, subsec, make, model
                                  FROM capture_dates WHERE drive_id = ?""", (drive_id,))
-            return {(rel, entry): Taken(text, offset, sort_key) if text is not None else None
-                    for rel, entry, stamp, text, offset, sort_key in rows if stamps.get((rel, entry)) == stamp}
+            return {(rel, entry): Taken(*values) if values[0] is not None else None
+                    for rel, entry, stamp, *values in rows if stamps.get((rel, entry)) == stamp}
 
     def save_dates(self, drive_id, dates):
         with self.connect() as db:
-            db.executemany("""INSERT OR REPLACE INTO capture_dates VALUES (?, ?, ?, ?, ?, ?, ?)""", [
-                (drive_id, *item.key, item.stamp, taken.text, taken.offset, taken.sort_key) if taken else
-                (drive_id, *item.key, item.stamp, None, None, None) for item, taken in dates.items()
+            db.executemany("""INSERT OR REPLACE INTO capture_dates
+                              (drive_id, rel_path, zip_entry, stamp, text, utc_offset, sort_key, subsec, make, model)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", [
+                (drive_id, *item.key, item.stamp, taken.text, taken.offset, taken.sort_key,
+                 taken.subsec, taken.make, taken.model) if taken else
+                (drive_id, *item.key, item.stamp, None, None, None, None, None, None) for item, taken in dates.items()
             ])
 
     def previous(self, drive, sizes):

@@ -8,11 +8,13 @@ import re
 from struct import Struct, unpack
 from zipfile import ZipExtFile
 
+from .items import RAW_EXTENSIONS
+
 READ_LIMIT = 4 * 1024 * 1024
 MOVIE_EPOCH = datetime(1904, 1, 1)
 VIDEOS = {"mp4", "mov", "m4v", "3gp"}
 HEIF = {"heic", "heif", "avif"}
-TIFF = set("tif tiff cr2 nef nrw arw sr2 dng orf rw2 pef srw".split())
+TIFF = {"tif", "tiff"} | (RAW_EXTENSIONS - {"cr3", "raf"})
 JPEG = {"jpg", "jpeg", "jpe", "jif", "jfif"}
 SUPPORTED = JPEG | TIFF | HEIF | VIDEOS | {"cr3", "raf", "png", "apng", "webp"}
 CANON_UUID = bytes.fromhex("85c0b687820f11e08111f4ce462b6a48")
@@ -28,6 +30,9 @@ class Taken:
     text: str
     offset: str | None
     sort_key: int
+    subsec: str | None = None
+    make: str | None = None
+    model: str | None = None
 
     @property
     def label(self):
@@ -151,21 +156,25 @@ def _uint(data):
 
 
 DATE_TAGS = ((0x9003, (0x9011, 0x9010)), (0x9004, (0x9012, 0x9010)), (0x0132, (0x9010,)))
-TEXT_TAGS = {tag for date, offsets in DATE_TAGS for tag in (date, *offsets)}
+CAMERA_TAGS = (0x9291, 0x010F, 0x0110)  # SubSecTimeOriginal, Make, Model
+TEXT_TAGS = set(CAMERA_TAGS) | {tag for date, offsets in DATE_TAGS for tag in (date, *offsets)}
 
 
 def _tag_date(tags):
+    camera = tuple(next((value for value in tags.get(tag, ()) if value), None) for tag in CAMERA_TAGS)
     for tag, offsets in DATE_TAGS:
         for value in tags.get(tag, ()):
             taken = _date(value)
             if taken is None:
                 continue
-            if taken.offset is None:
-                for offset_tag in offsets:
-                    for offset in tags.get(offset_tag, ()):
-                        if (with_offset := _date(value, offset)).offset is not None:
-                            return with_offset
-            return taken
+            for offset_tag in offsets:
+                if taken.offset is not None:
+                    break
+                for offset in tags.get(offset_tag, ()):
+                    if (with_offset := _date(value, offset)).offset is not None:
+                        taken = with_offset
+                        break
+            return Taken(taken.text, taken.offset, taken.sort_key, *camera)
     return None
 
 

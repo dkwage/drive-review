@@ -20,6 +20,16 @@ def read_item_taken(reader, root, item):
     return None
 
 
+def read_pair_dates(capture, candidates, known, keys, stop):
+    """Resolve missing pair metadata before accepting an automatic Delete flag."""
+    pairs = {candidates[key] for key in keys if key in candidates}
+    with ItemReader() as reader:
+        dates = {item.key: capture.read(item, reader, stop)
+                 for pair in pairs for item in pair.items if item.key not in known}
+    capture.save()
+    return dates
+
+
 class CaptureDates:
     def __init__(self, index, drive, items):
         self.index, self.drive = index, drive

@@ -8,7 +8,9 @@ import shutil
 from sqlite3 import Error as SQLiteError
 import tempfile
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, QSignalBlocker, QThread, QThreadPool, QTimer, Qt, QUrl
+from PySide6.QtCore import (
+    QEvent, QItemSelection, QItemSelectionModel, QSettings, QSignalBlocker, QThread, QThreadPool, QTimer, Qt, QUrl,
+)
 from PySide6.QtGui import QDesktopServices, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
@@ -17,13 +19,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ..capture import CaptureDates
+from ..capture import CaptureDates, read_pair_dates
 from ..drives import discover_drives, identify_drive
 from ..dupes import check_cancel, find_duplicates
 from ..export import inventory_excel, prepare_upload
 from ..flags import Flag, FlagStore
 from ..index import Index
 from ..items import CATEGORY_LABELS, bytes_label
+from ..pairs import cycle_choice, pair_candidates, restore_choice
 from ..paths import local_data_dir
 from ..quarantine import MoveResult, delete_quarantine, quarantine_inventory, quarantine_items, undo_quarantine
 from ..scan import flagged_items, scan
@@ -86,8 +89,10 @@ class MainWindow(QMainWindow):
         self.store = None
         self.scan_result = None
         self.flags = {}
+        self.cleared_choices = {}
         self.hashes = {}
         self.groups = []
+        self.pair_candidates = {}
         self.folder = ""
         self.local_flags_path = None
         self.messages = []
@@ -126,6 +131,7 @@ class MainWindow(QMainWindow):
         self.quick_look = QuickLook(self, self.settings)
         self.quick_look.navigate.connect(self._preview_navigate)
         self.quick_look.flag_requested.connect(partial(self.mark_selected, current_only=True))
+        self.quick_look.choice_requested.connect(self.choose_pair_upload)
         self.quick_look.open_requested.connect(self.open_selected)
         self.quick_look.idle.connect(self._thumbnail_idle)
         self.quick_look.finished.connect(self._preview_closed)
@@ -294,7 +300,7 @@ class MainWindow(QMainWindow):
         gallery_top.addWidget(self.visible_count)
         gallery_top.addWidget(self.selection_count)
         gallery_top.addStretch()
-        gallery_top.addWidget(QLabel("Z Upload   X Delete   C Clear   Space Quick Look"))
+        gallery_top.addWidget(QLabel("Z Upload   X Delete   C Clear   R Choose RAW/JPG   Space Quick Look"))
         right.addLayout(gallery_top)
 
         self.grid = QListView()
@@ -309,6 +315,12 @@ class MainWindow(QMainWindow):
         self.grid.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.grid.setAccessibleName("File review grid")
         self.model = ReviewModel(self.grid)
+        view_menu = self.menuBar().addMenu("View")
+        self.group_pairs = view_menu.addAction("Group RAW+JPG pairs")
+        self.group_pairs.setCheckable(True)
+        self.model.group_pairs = self.settings.value("group_pairs", True, type=bool)
+        self.group_pairs.setChecked(self.model.group_pairs)
+        self.group_pairs.toggled.connect(self._toggle_pairs)
         self.grid.setModel(self.model)
         self.thumbnails = ThumbnailQueue(ThumbnailCache(self.data_dir / "thumbs"), self.grid)
         self.thumbnails.idle.connect(self._thumbnail_idle)
@@ -319,7 +331,8 @@ class MainWindow(QMainWindow):
         self.grid.selectionModel().selectionChanged.connect(self._selected_count)
         for key, handler in (("Z", partial(self.mark_selected, "green")),
                              ("X", partial(self.mark_selected, "red")),
-                             ("C", partial(self.mark_selected, "")), ("Space", self.preview_selected),
+                             ("C", partial(self.mark_selected, "")), ("R", self.choose_pair_upload),
+                             ("Space", self.preview_selected),
                              ("Return", self.open_selected), ("Enter", self.open_selected)):
             shortcut = QShortcut(QKeySequence(key), self.grid)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -358,6 +371,7 @@ class MainWindow(QMainWindow):
         self.drive_picker.setEnabled(ready)
         self.refresh_button.setEnabled(ready and self.discovery is None)
         self.show_hidden.setEnabled(ready)
+        self.group_pairs.setEnabled(ready)
         for button in (self.duplicate_button, self.inventory_button, self.owner, self.verify):
             button.setEnabled(ready and loaded)
         self.groups_button.setEnabled(ready and bool(self.groups))
@@ -497,10 +511,14 @@ class MainWindow(QMainWindow):
                 result.errors.append(f"Quarantine status is unavailable. {error}")
                 quarantine = None
             media = [item for item in result.items if item.category in ("Image", "Video")]
-            return drive, store, result, flags, hashes, local, quarantine, media, CaptureDates(self.index, drive, media)
+            capture = CaptureDates(self.index, drive, media)
+            cleared_choices = self.index.cleared_pair_choices(drive.id)
+            return (drive, store, result, flags, hashes, local, quarantine, media, capture,
+                    pair_candidates(media), cleared_choices)
 
         def loaded(data):
-            self.drive, self.store, result, self.flags, self.hashes, local, quarantine, media, self.capture = data
+            (self.drive, self.store, result, self.flags, self.hashes, local, quarantine, media,
+             self.capture, self.pair_candidates, self.cleared_choices) = data
             self.quarantine_count = quarantine.count if quarantine else 0
             self.quarantine_size = quarantine.size if quarantine else 0
             self.scan_result = result
@@ -512,8 +530,10 @@ class MainWindow(QMainWindow):
             self.model.taken = dict(self.capture.cached)
             self.groups = []
             self.model.duplicates = {}
-            self.model.flag_states = {item.key: flag.flag for item in result.items
-                                if (flag := self._current_flag(item)) is not None}
+            self.model.pairs.clear()
+            self.model.pair_choices.clear()
+            self._load_flag_states(result.items)
+            self._add_pairs(self.model.taken)
             self.thumbnails.set_drive(self.drive)
             self.folder = ""
             with QSignalBlocker(self.tree.selectionModel()):
@@ -581,6 +601,10 @@ class MainWindow(QMainWindow):
     def _show_taken(self, dates):
         changed = [key for key, taken in dates.items() if taken != self.model.taken.get(key)]
         self.model.taken.update(dates)
+        if self._add_pairs(changed) and self.model.group_pairs:
+            self._apply_filter()
+            self._update_summary()
+            return
         self.model.changed_details(changed)
         if changed and self.sort.currentData() == "taken" and not self.capture_sort_timer.isActive():
             self.capture_sort_timer.start()
@@ -603,16 +627,69 @@ class MainWindow(QMainWindow):
         if self.drive is not None:
             self.open_root(self.drive.root)
 
+    def _add_pairs(self, keys):
+        candidates = {self.pair_candidates[key] for key in keys
+                      if key in self.pair_candidates and key not in self.model.pairs}
+        pairs = [pair for pair in candidates if pair.matches(self.model.taken)]
+        for pair in pairs:
+            self.model.pairs.update({item.key: pair for item in pair.items})
+        self._restore_pairs(pairs)
+        return bool(pairs)
+
+    def _restore_pairs(self, pairs):
+        changed = False
+        for pair in pairs:
+            if self.model.group_pairs:
+                for item in pair.items:
+                    flag = self._current_flag(item)
+                    if flag and flag.flag == "red" and flag.reason == "duplicate":
+                        self.flags.pop(item.key)
+                        self.model.flag_states.pop(item.key, None)
+                        self.model.duplicates.setdefault(item.key, "Duplicate · Suggested Delete")
+                        changed = True
+            choice = restore_choice(*(self._current_flag(item) for item in pair.items),
+                                    default=self.cleared_choices.get(pair.stamp, "jpg"))
+            self.model.pair_choices[pair.jpg.key] = choice
+            if self.model.group_pairs:
+                for item in pair.items:
+                    flag = self._current_flag(item)
+                    if flag and flag.pair_choice != choice:
+                        self.flags[item.key] = replace(flag, pair_choice=choice)
+                        changed = True
+        if changed:
+            self._dirty()
+
+    def _toggle_pairs(self, checked):
+        self.settings.setValue("group_pairs", checked)
+        self.model.group_pairs = checked
+        if checked:
+            self._restore_pairs(set(self.model.pairs.values()))
+            self._update_summary()
+        self._apply_filter()
+
     def _select_folder(self, current, previous):
         self.folder = current.data(FOLDER) or ""
         self._apply_filter()
 
     def _apply_filter(self, *_args):
-        previous = self.grid.currentIndex().data(ITEM)
-        self.model.filter(self.folder, self.category.currentData(), self.flag_filter.currentData(),
-                          self.search.text(), self.sort.currentData())
-        if previous is not None and previous.key in self.model.rows:
-            self.grid.setCurrentIndex(self.model.index(self.model.rows[previous.key]))
+        selection = self.grid.selectionModel()
+        previous = selection.currentIndex().data(ITEM)
+        selected = [item.key for item in self._selected_items()]
+        with QSignalBlocker(selection):
+            if self.model.filter(self.folder, self.category.currentData(), self.flag_filter.currentData(),
+                                 self.search.text(), self.sort.currentData()):
+                rows = {self.model.rows[key] for key in selected if key in self.model.rows}
+                restored = QItemSelection()
+                for row in sorted(rows):
+                    index = self.model.index(row)
+                    restored.select(index, index)
+                selection.select(restored, QItemSelectionModel.SelectionFlag.Select)
+                current = self.model.rows.get(previous.key) if previous else None
+                if current is None and rows:
+                    current = min(rows)
+                if current is not None:
+                    selection.setCurrentIndex(self.model.index(current), QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.grid.viewport().update()
         self.visible_count.setText(f"{self.model.rowCount():,} files")
         self.preview_filter_dirty = False
         self._selected_count()
@@ -647,6 +724,10 @@ class MainWindow(QMainWindow):
             return flag
         return None
 
+    def _load_flag_states(self, items):
+        self.model.flag_states = {item.key: flag.flag for item in items
+                                  if (flag := self._current_flag(item)) is not None}
+
     def _selected_item(self):
         return self.grid.currentIndex().data(ITEM) or next(iter(self._selected_items()), None)
 
@@ -654,22 +735,41 @@ class MainWindow(QMainWindow):
         return [row.data(ITEM) for row in self.grid.selectionModel().selectedRows()]
 
     def mark_selected(self, flag, *, current_only=False):
+        items = [] if current_only or self.quick_look.isVisible() else self._selected_items()
+        if not items and (item := self._selected_item()) is not None:
+            items = [item]
+        self._mark_items(items, flag)
+
+    def choose_pair_upload(self, choice=""):
+        items = [] if choice else self._selected_items()
+        if not items and (current := self._selected_item()) is not None:
+            items = [current]
+        self._mark_items(items, "green", pair_choice=choice)
+
+    def _mark_items(self, items, flag, *, pair_choice=None):
         if self._busy() or self.drive is None:
             return
         previewing = self.quick_look.isVisible()
-        items = [] if current_only or previewing else self._selected_items()
-        if not items and (item := self._selected_item()) is not None:
-            items = [item]
         keys = []
         for item in items:
-            if flag:
-                self.flags[item.key] = Flag.for_item(item, flag, "manual", self.reviewer.text().strip(),
-                                                     self.hashes.get(item.key, ""))
-                self.model.flag_states[item.key] = flag
-                keys.append(item.key)
-            elif self.flags.pop(item.key, None) is not None:
-                self.model.flag_states.pop(item.key, None)
-                keys.append(item.key)
+            pair = self.model.pair_for(item)
+            if pair is None:
+                if pair_choice is None and self._set_flag(item, flag):
+                    keys.append(item.key)
+                continue
+            choice = self.model.pair_choices[pair.jpg.key]
+            if pair_choice is not None:
+                choice = pair_choice or cycle_choice(choice)
+                self.model.pair_choices[pair.jpg.key] = choice
+            if not flag and choice != "jpg":
+                self.cleared_choices[pair.stamp] = choice
+            else:
+                self.cleared_choices.pop(pair.stamp, None)
+            flagged = pair.uploads(choice) if flag == "green" else pair.items
+            for member in pair.items:
+                member_flag = flag if member in flagged else ""
+                if self._set_flag(member, member_flag, choice if member_flag else ""):
+                    keys.append(member.key)
         if keys:
             filtered = self.flag_filter.currentData() in {"none", "green", "red"}
             if filtered and not previewing:
@@ -680,6 +780,16 @@ class MainWindow(QMainWindow):
             self._sync_preview()
             self._update_summary()
             self._dirty()
+
+    def _set_flag(self, item, flag, choice=""):
+        key = item.key
+        if flag:
+            self.model.flag_states[key] = flag
+            self.flags[key] = Flag.for_item(item, flag, "manual", self.reviewer.text().strip(),
+                                            self.hashes.get(key, ""), pair_choice=choice)
+            return True
+        self.model.flag_states.pop(key, None)
+        return self.flags.pop(key, None) is not None
 
     def _dirty(self):
         self.revision += 1
@@ -699,11 +809,12 @@ class MainWindow(QMainWindow):
             return
         revision = self.revision
         snapshot = dict(self.flags)
+        cleared_choices = dict(self.cleared_choices)
         drive, store = self.drive, self.store
 
         def persist(_stop, _report):
             location, fallback = store.save(snapshot)
-            self.index.replace_flags(drive, snapshot)
+            self.index.replace_flags(drive, snapshot, cleared_choices=cleared_choices)
             return location, fallback
 
         def finished(data, error):
@@ -741,11 +852,18 @@ class MainWindow(QMainWindow):
     def _run_duplicates(self):
         drive, items = self.drive, list(self.model.items)
         flags, verify = dict(self.flags), self.verify.isChecked()
+        capture, known = self.capture, set(self.model.taken)
+        candidates = self.pair_candidates if self.model.group_pairs else {}
 
         def find(stop, progress):
-            return find_duplicates(drive, items, flags, self.index, stop, progress, verify)
+            result = find_duplicates(drive, items, flags, self.index, stop, progress, verify)
+            keys = (key for group in result.groups for key in group.suggestions)
+            dates = read_pair_dates(capture, candidates, known, keys, stop)
+            return result, dates
 
-        def show(result):
+        def show(data):
+            result, dates = data
+            self._show_taken(dates)
             self.groups = result.groups
             self.hashes.update(result.hashes)
             by_key = {item.key: item for item in items}
@@ -759,7 +877,10 @@ class MainWindow(QMainWindow):
                     if record.drive_id == drive.id:
                         duplicates[record.item.key] = label
                 for key in group.suggestions:
-                    if key in flags:  # Preserve an existing reviewer decision, even if the file changed.
+                    if self.model.pair_for(by_key[key]):
+                        duplicates[key] += " · Suggested Delete"
+                        continue
+                    if key in flags:  # Preserve a previous decision, even on a changed file.
                         continue
                     self.flags[key] = Flag.for_item(by_key[key], "red", "duplicate", self.reviewer.text().strip(),
                                                    self.hashes[key])
@@ -770,9 +891,9 @@ class MainWindow(QMainWindow):
                 if flag and not flag.hash and flag.matches(by_key[key]):
                     self.flags[key] = replace(flag, hash=digest)
                     changed = True
-            self.model.flag_states = {item.key: flag.flag for item in items
-                                if (flag := self._current_flag(item)) is not None}
+            self._load_flag_states(items)
             self.model.duplicates = duplicates
+            self._restore_pairs(set(self.model.pairs.values()))
             self._apply_filter()
             self._update_summary()
             if changed:
@@ -807,6 +928,8 @@ class MainWindow(QMainWindow):
                 details = [labels[status]] if status else []
                 if record is group.keeper:
                     details.append("Suggested keeper")
+                if not status and record.drive_id == self.drive.id and record.item.key in group.suggestions:
+                    details.append("Suggested Delete")
                 if record.drive_id in group.unverified:
                     details.append("Index match")
                 child = QTreeWidgetItem([record.item.identity, record.label, bytes_label(record.item.size),
@@ -857,8 +980,10 @@ class MainWindow(QMainWindow):
             return
         current = self.grid.currentIndex()
         item = current.data(ITEM)
-        flag = self.model.flag_states.get(item.key, "") if item else ""
+        flag = self.model.flag_for(item) if item else ""
         self.quick_look.set_item(self.drive.root, item, current.row() + 1, self.model.rowCount(), flag)
+        pair = self.model.pair_for(item) if item else None
+        self.quick_look.set_pair_choice(self.model.pair_choices[pair.jpg.key] if pair else None)
         self.quick_look.set_taken(self.model.taken.get(item.key) if item else None)
         self._request_preview_taken(item)
 
@@ -939,19 +1064,29 @@ class MainWindow(QMainWindow):
         self.quick_look.close()
         root = self.drive.root
         flags, hashes = dict(self.flags), dict(self.hashes)
+        capture = self.capture
+        candidates = self.pair_candidates if self.model.group_pairs else {}
+        known = dict(self.model.taken)
 
         def collect(stop, _report):
-            items, errors = flagged_items(root, flags, "red", stop, include_entries=False)
+            automatic = {key for key in candidates if (flag := flags.get(key)) and flag.flag == "red"
+                         and flag.reason == "duplicate" and not flag.zip_entry}
+            dates = read_pair_dates(capture, candidates, known, automatic, stop)
+            available = known | dates
+            protected = {key for key in automatic if candidates[key].matches(available)}
+            eligible_flags = {key: flag for key, flag in flags.items() if key not in protected}
+            items, errors = flagged_items(root, eligible_flags, "red", stop, include_entries=False)
             eligible = []
             for item in items:
                 if flags[item.key].hash in ("", hashes.get(item.key, flags[item.key].hash)):
                     eligible.append(item)
                 else:
                     errors.append(f"File contents changed after review: {item.identity}")
-            return eligible, errors
+            return eligible, errors, dates
 
         def confirm(result):
-            items, errors = result
+            items, errors, dates = result
+            self._show_taken(dates)
             if not items:
                 self._set_notice(["No loose files are eligible for quarantine. ZIP entries cannot be moved individually.", *errors])
                 return

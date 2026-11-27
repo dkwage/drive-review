@@ -6,6 +6,7 @@ from PySide6.QtCore import QAbstractItemModel, QAbstractListModel, QModelIndex, 
 from PySide6.QtWidgets import QApplication, QStyle
 
 from ..items import bytes_label, date_label
+from ..pairs import CHOICE_LABELS
 
 ITEM = Qt.ItemDataRole.UserRole + 1
 FOLDER = Qt.ItemDataRole.UserRole + 2
@@ -20,6 +21,9 @@ class ReviewModel(QAbstractListModel):
         self.duplicates = {}
         self.taken = {}
         self.rows = {}
+        self.group_pairs = True
+        self.pairs = {}
+        self.pair_choices = {}
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.visible)
@@ -33,35 +37,65 @@ class ReviewModel(QAbstractListModel):
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.AccessibleTextRole):
             return item.name
         if role in (Qt.ItemDataRole.ToolTipRole, Qt.ItemDataRole.AccessibleDescriptionRole):
-            values = [item.identity, bytes_label(item.size),
-                      f"Created {date_label(item.ctime_ns)} · Modified {date_label(item.mtime_ns)}"]
+            pair = self.pair_for(item)
+            if pair:
+                values = ["RAW+JPG"]
+                statuses = {"green": "Upload", "red": "Delete"}
+                for member in pair.items:
+                    status = statuses.get(self.flag_states.get(member.key), "Unflagged")
+                    values.append(f"{member.identity} · {bytes_label(member.size)} · {status}")
+                values.append(f"Upload choice · {CHOICE_LABELS[self.pair_choices[pair.jpg.key]]}")
+            else:
+                values = [item.identity, bytes_label(item.size)]
             if taken := self.taken.get(item.key):
-                values.insert(2, f"Taken {taken.label}")
-            if flag := self.flag_states.get(item.key):
+                values.append(f"Taken {taken.label}")
+            values.append(f"Created {date_label(item.ctime_ns)} · Modified {date_label(item.mtime_ns)}")
+            if not pair and (flag := self.flag_for(item)):
                 values.append("Upload" if flag == "green" else "Delete")
-            if duplicate := self.duplicates.get(item.key):
+            if duplicate := self.duplicate_for(item):
                 values.append(duplicate)
             if item.warning:
                 values.append(item.warning)
             return "\n".join(values)
         return None
 
+    def pair_for(self, item):
+        return self.pairs.get(item.key) if self.group_pairs else None
+
+    def flag_for(self, item):
+        if pair := self.pair_for(item):
+            raw, jpg = (self.flag_states.get(member.key) for member in pair.items)
+            return "green" if "green" in (raw, jpg) else raw or jpg
+        return self.flag_states.get(item.key)
+
+    def duplicate_for(self, item):
+        if pair := self.pair_for(item):
+            labels = (self.duplicates.get(member.key) for member in pair.items)
+            return " · ".join(dict.fromkeys(label for label in labels if label))
+        return self.duplicates.get(item.key)
+
     def filter(self, folder, category, flag, search, sort):
         text = search.strip().casefold()
         matches = []
         prefix = folder + "/"
         for item in self.items:
+            pair = self.pair_for(item)
+            if pair and item == pair.raw:
+                continue
             if folder and item.folder != folder and not item.folder.startswith(prefix):
                 continue
             if category and item.category != category:
                 continue
-            current = self.flag_states.get(item.key, "none")
             if flag == "duplicate":
-                if item.key not in self.duplicates:
+                if not self.duplicate_for(item):
                     continue
-            elif flag and current != flag:
+            elif pair and flag in {"green", "red"}:
+                if all(self.flag_states.get(member.key) != flag for member in pair.items):
+                    continue
+            elif flag and (self.flag_for(item) or "none") != flag:
                 continue
-            if text and text not in item.identity.casefold():
+            if (text and text not in item.identity.casefold()
+                    and (pair is None or text not in pair.raw.identity.casefold())):
                 continue
             matches.append(item)
 
@@ -78,10 +112,21 @@ class ReviewModel(QAbstractListModel):
         else:
             matches.sort(key=lambda item: item.name.casefold())
 
-        self.beginResetModel()
+        reset = matches != self.visible
+        if reset:
+            self.beginResetModel()
         self.visible = matches
-        self.rows = {item.key: row for row, item in enumerate(matches)}
-        self.endResetModel()
+        self._index_rows()
+        if reset:
+            self.endResetModel()
+        return reset
+
+    def _index_rows(self):
+        self.rows = {}
+        for row, item in enumerate(self.visible):
+            self.rows[item.key] = row
+            if pair := self.pair_for(item):
+                self.rows[pair.raw.key] = row
 
     def _taken_order(self, item):
         date = self.taken.get(item.key)
@@ -95,15 +140,14 @@ class ReviewModel(QAbstractListModel):
         previous = self.persistentIndexList()
         keys = [self.visible[index.row()].key for index in previous]
         self.visible = matches
-        self.rows = {item.key: row for row, item in enumerate(matches)}
+        self._index_rows()
         self.changePersistentIndexList(previous, [self.index(self.rows[key]) for key in keys])
         self.layoutChanged.emit()
 
     def changed_details(self, keys):
         rows = sorted({self.rows[key] for key in keys if key in self.rows})
         if rows:
-            self.dataChanged.emit(self.index(rows[0]), self.index(rows[-1]),
-                                  [Qt.ItemDataRole.ToolTipRole, Qt.ItemDataRole.AccessibleDescriptionRole])
+            self.dataChanged.emit(self.index(rows[0]), self.index(rows[-1]))
 
 
 @dataclass(slots=True)

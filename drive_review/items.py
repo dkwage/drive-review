@@ -5,10 +5,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
+RAW_EXTENSIONS = frozenset("raw arw srf sr2 cr2 cr3 crw nef nrw dng raf rw2 orf pef ptx srw x3f 3fr iiq mos rwl dcr kdc".split())
+
 CATEGORIES = {
     "Video": "mp4 mkv avi mov wmv mpeg mpg webm m4v 3gp 3g2 asf flv mts m2ts mxf vob ogv divx",
-    "Image": ("jpg jpeg jpe jif jfif png apng gif bmp webp heic heif avif tif tiff ico svg "
-              "raw arw srf sr2 cr2 cr3 crw nef nrw dng raf rw2 orf pef ptx srw x3f 3fr iiq mos rwl dcr kdc"),
+    "Image": "jpg jpeg jpe jif jfif png apng gif bmp webp heic heif avif tif tiff ico svg " + " ".join(sorted(RAW_EXTENSIONS)),
     "Docs": ("pdf doc docx docm dot dotx xls xlsx xlsm xlsb ppt pptx pptm pps ppsx hwp hwpx hwt "
              "txt csv tsv odt ods odp rtf pages numbers key md epub"),
     "Music": "mp3 wav flac aac m4a ogg wma aiff aif alac ape opus mid midi amr mka dsf dff",

@@ -20,11 +20,14 @@ from drive_review.taken import CANON_UUID, read_taken
 from drive_review.zipsource import ItemReader
 
 
-def photo(format="JPEG", *, taken="2021:11:14 10:13:12", offset="-05:30"):
+def photo(format="JPEG", *, taken="2021:11:14 10:13:12", offset="-05:30", camera=False):
     image = Image.new("RGB", (20, 20))
     exif = image.getexif()
     exif[0x0132] = "2024:01:02 03:04:05"
     exif[0x8769] = {0x9003: taken, 0x9004: "2022:01:01 00:00:00", 0x9011: offset}
+    if camera:
+        exif[0x010F], exif[0x0110] = "Canon", "EOS R6"
+        exif[0x8769][0x9291] = "032"
     output = BytesIO()
     if format == "HEIF":
         from_pillow(image).save(output, exif=exif.tobytes())
@@ -59,6 +62,13 @@ def mvhd(version, date):
 
 
 class ReadTakenTests(unittest.TestCase):
+    def test_reads_pair_metadata_from_exif_and_raw(self):
+        fields = {0x9003: "2021:11:14 10:13:12", 0x9011: "-05:30",
+                  0x9291: "032", 0x010F: "Canon", 0x0110: "EOS R6"}
+        jpeg = read_taken(BytesIO(photo(camera=True)), "photo.jpg")
+        self.assertEqual((jpeg.subsec, jpeg.make, jpeg.model), ("032", "Canon", "EOS R6"))
+        self.assertEqual(read_taken(BytesIO(tiff(">", fields)), "photo.CR2"), jpeg)
+
     def test_pillow_jpeg_prefers_original_and_uses_offset_for_sort(self):
         shifted = read_taken(BytesIO(photo()), "FAMILY.JPG")
         local = read_taken(BytesIO(photo(offset="")), "family.jpg")
@@ -180,6 +190,25 @@ class ReadTakenTests(unittest.TestCase):
 
 
 class CaptureCacheTests(unittest.TestCase):
+    def test_legacy_capture_rows_are_refreshed_with_camera_metadata(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / "old.sqlite"
+            (root / "photo.jpg").write_bytes(photo(camera=True))
+            drive = identify_drive(root)
+            items = scan(root).items
+            with connect(path) as old:
+                old.execute("""CREATE TABLE capture_dates (
+                    drive_id TEXT, rel_path TEXT, zip_entry TEXT, stamp TEXT, text TEXT,
+                    utc_offset TEXT, sort_key INTEGER, PRIMARY KEY (drive_id, rel_path, zip_entry, stamp))""")
+                old.execute("INSERT INTO capture_dates VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (drive.id, *items[0].key, items[0].stamp, "2021-11-14 10:13:12", "-05:30", 1))
+            capture = CaptureDates(Index(path), drive, items)
+            self.assertEqual(capture.cached, {})
+            capture.read_all(items, Event(), lambda *_: None)
+            cached = CaptureDates(Index(path), drive, items).cached[items[0].key]
+            self.assertEqual((cached.subsec, cached.make, cached.model), ("032", "Canon", "EOS R6"))
+
     def test_cache_migrates_existing_index_and_reuses_positive_and_negative_results(self):
         with TemporaryDirectory() as directory:
             base = Path(directory).resolve()
