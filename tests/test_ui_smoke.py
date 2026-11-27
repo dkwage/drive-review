@@ -303,9 +303,10 @@ class ReviewSmokeTests(unittest.TestCase):
                     self.assertIn(" · Modified ", preview.details.text())
                     self.wait_until(lambda: window.model.visible[0].name == "b-preview.jpg")
                     release.set()
-                    self.wait_until(lambda: window.capture_pass is None and window.model.visible[0].name == "a-blocked.jpg")
-                    self.assertEqual([item.name for item in window.model.visible],
-                                     ["a-blocked.jpg", "b-preview.jpg", "c-equal.jpg", "00-notes.txt", "z-unknown.jpg"])
+                    expected = ["a-blocked.jpg", "b-preview.jpg", "c-equal.jpg", "00-notes.txt", "z-unknown.jpg"]
+                    # Dates can arrive in separate batches; the taken sort is debounced.
+                    self.wait_until(lambda: window.capture_pass is None
+                                    and [item.name for item in window.model.visible] == expected)
                     self.assertEqual(window.grid.currentIndex().data(), "b-preview.jpg")
                     self.assertEqual(preview.position.text(), "2 / 5")
                     self.assertIn("\nTaken 2019-06-02 05:04:05 +02:00\n",
