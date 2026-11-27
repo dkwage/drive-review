@@ -15,7 +15,7 @@ from PySide6.QtGui import QDesktopServices, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
     QApplication, QHBoxLayout, QLabel, QLineEdit, QListView, QMainWindow, QMenu, QMessageBox,
-    QProgressBar, QPushButton, QSlider, QSplitter, QToolButton, QTreeView, QTreeWidget, QTreeWidgetItem,
+    QProgressBar, QPushButton, QSlider, QSplitter, QToolButton, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -26,6 +26,7 @@ from ..export import inventory_excel, prepare_upload
 from ..flags import Flag, FlagStore
 from ..index import Index
 from ..items import CATEGORY_LABELS, bytes_label
+from ..organize import create_folder, move_items, move_path, remap_flags, remap_path
 from ..pairs import cycle_choice, pair_candidates, restore_choice
 from ..paths import local_data_dir
 from ..quarantine import MoveResult, delete_quarantine, quarantine_inventory, quarantine_items, undo_quarantine
@@ -34,7 +35,8 @@ from ..thumbs import ThumbnailCache, copy_for_view
 from ..zipsource import ItemReader
 from .grid import ReviewDelegate, ThumbnailQueue
 from .models import FOLDER, ITEM, FolderModel, ReviewModel
-from .quick_look import QuickLook
+from .organizer import FolderPicker, FolderTree, ReviewGrid, ask_name, select_folder
+from .quick_look import QUARANTINE_HINT, QUARANTINE_KEYS, QuickLook
 from .workers import Worker
 
 QUEUED = Qt.ConnectionType.QueuedConnection
@@ -93,6 +95,7 @@ class MainWindow(QMainWindow):
         self.hashes = {}
         self.groups = []
         self.pair_candidates = {}
+        self.removed_capture_keys = set()
         self.folder = ""
         self.local_flags_path = None
         self.messages = []
@@ -132,6 +135,7 @@ class MainWindow(QMainWindow):
         self.quick_look.navigate.connect(self._preview_navigate)
         self.quick_look.flag_requested.connect(partial(self.mark_selected, current_only=True))
         self.quick_look.choice_requested.connect(self.choose_pair_upload)
+        self.quick_look.quarantine_requested.connect(self.quarantine_selected)
         self.quick_look.open_requested.connect(self.open_selected)
         self.quick_look.idle.connect(self._thumbnail_idle)
         self.quick_look.finished.connect(self._preview_closed)
@@ -276,12 +280,16 @@ class MainWindow(QMainWindow):
         left = QVBoxLayout(sidebar)
         left.setContentsMargins(13, 10, 8, 9)
         left.addWidget(QLabel("Folders", objectName="section"))
-        self.tree = QTreeView()
+        self.tree = FolderTree()
         self.tree.setHeaderHidden(True)
         self.tree.setUniformRowHeights(True)
         self.folder_model = FolderModel(self.tree)
         self.tree.setModel(self.folder_model)
         self.tree.selectionModel().currentChanged.connect(self._select_folder)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._tree_context)
+        self.tree.path_dropped.connect(self._move_tree_path)
+        self.tree.items_dropped.connect(self._move_selected_items)
         left.addWidget(self.tree, 1)
         self.reviewer = QLineEdit(self.settings.value("reviewer", "", type=str))
         self.reviewer.setAccessibleName("Reviewer name")
@@ -300,10 +308,13 @@ class MainWindow(QMainWindow):
         gallery_top.addWidget(self.visible_count)
         gallery_top.addWidget(self.selection_count)
         gallery_top.addStretch()
-        gallery_top.addWidget(QLabel("Z Upload   X Delete   C Clear   R Choose RAW/JPG   Space Quick Look"))
+        gallery_top.addWidget(QLabel(
+            f"Z Upload   X Flag Delete   C Clear   R RAW/JPG   M Move   {QUARANTINE_HINT}   Space Quick Look",
+            wordWrap=True))
         right.addLayout(gallery_top)
 
-        self.grid = QListView()
+        self.grid = ReviewGrid()
+        self.tree.grid = self.grid
         self.grid.setViewMode(QListView.ViewMode.IconMode)
         self.grid.setMovement(QListView.Movement.Static)
         self.grid.setResizeMode(QListView.ResizeMode.Adjust)
@@ -322,6 +333,17 @@ class MainWindow(QMainWindow):
         self.group_pairs.setChecked(self.model.group_pairs)
         self.group_pairs.toggled.connect(self._toggle_pairs)
         self.grid.setModel(self.model)
+        self.organize_menu = self.menuBar().addMenu("Organize")
+        move_action = self.organize_menu.addAction("Move selected to folder…", self.choose_move_selected)
+        move_action.setShortcut(QKeySequence("M"))
+        move_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        move_action.setAutoRepeat(False)
+        self.grid.addAction(move_action)
+        self.organize_menu.addAction("Move Upload files to folder…", partial(self.choose_move_flagged, "green"))
+        self.organize_menu.addAction("Move Delete files to folder…", partial(self.choose_move_flagged, "red"))
+        self.organize_menu.addAction("New folder…", self._new_current_folder)
+        self.grid.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.grid.customContextMenuRequested.connect(self._grid_context)
         self.thumbnails = ThumbnailQueue(ThumbnailCache(self.data_dir / "thumbs"), self.grid)
         self.thumbnails.idle.connect(self._thumbnail_idle)
         self.delegate = ReviewDelegate(self.thumbnails, self.grid)
@@ -337,6 +359,11 @@ class MainWindow(QMainWindow):
             shortcut = QShortcut(QKeySequence(key), self.grid)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(handler)
+        for key in QUARANTINE_KEYS:
+            shortcut = QShortcut(QKeySequence(key), self.grid)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.setAutoRepeat(False)
+            shortcut.activated.connect(self.quarantine_selected)
         right.addWidget(self.grid, 1)
         split.addWidget(gallery)
         split.setSizes([235, 1025])
@@ -372,6 +399,9 @@ class MainWindow(QMainWindow):
         self.refresh_button.setEnabled(ready and self.discovery is None)
         self.show_hidden.setEnabled(ready)
         self.group_pairs.setEnabled(ready)
+        self.organize_menu.setEnabled(ready and loaded)
+        self.tree.setDragEnabled(ready and loaded)
+        self.grid.setDragEnabled(ready and loaded)
         for button in (self.duplicate_button, self.inventory_button, self.owner, self.verify):
             button.setEnabled(ready and loaded)
         self.groups_button.setEnabled(ready and bool(self.groups))
@@ -393,7 +423,7 @@ class MainWindow(QMainWindow):
         dialog.setDetailedText("\n".join(shown))
         dialog.exec()
 
-    def _run(self, label, function, success, progress=None):
+    def _run(self, label, function, success, progress=None, *, finish_before_close=False):
         if self.operation is not None:
             return
         worker = Worker(function)
@@ -411,7 +441,7 @@ class MainWindow(QMainWindow):
             self.operation = None
             for widget in (self.progress_label, self.progress, self.cancel_button):
                 widget.hide()
-            if self.closing:
+            if self.closing and not finish_before_close:
                 self.close()
                 return
             if isinstance(error, InterruptedError):
@@ -424,6 +454,8 @@ class MainWindow(QMainWindow):
                 except (OSError, ValueError, SQLiteError) as failure:
                     self._set_notice([f"{label} failed", str(failure)])
             self._update_controls()
+            if self.closing:
+                self.close()
 
         worker.signals.done.connect(finished, QUEUED)
         self.pool.start(worker)
@@ -486,7 +518,7 @@ class MainWindow(QMainWindow):
             return
         self._after_flags_saved(lambda: self._scan_root(path))
 
-    def _scan_root(self, path, messages=()):
+    def _scan_root(self, path, messages=(), *, view=None):
         if self.quick_look.isVisible():
             self.quick_look.close()
         self._cancel_capture_pass(detach=True)
@@ -522,6 +554,7 @@ class MainWindow(QMainWindow):
             self.quarantine_count = quarantine.count if quarantine else 0
             self.quarantine_size = quarantine.size if quarantine else 0
             self.scan_result = result
+            self.removed_capture_keys.clear()
             self.local_flags_path = self.store.local_path if local else None
             self.revision = self.saved_revision = 0
             self.source.setText(self.drive.label)
@@ -535,13 +568,11 @@ class MainWindow(QMainWindow):
             self._load_flag_states(result.items)
             self._add_pairs(self.model.taken)
             self.thumbnails.set_drive(self.drive)
-            self.folder = ""
-            with QSignalBlocker(self.tree.selectionModel()):
-                self.folder_model.rebuild(result.directories, result.archives)
-                root = self.folder_model.index(0, 0)
-                self.tree.expand(root)
-                self.tree.setCurrentIndex(root)
+            folder, keys, current, expanded = view or ("", (), None, ())
+            self._rebuild_tree(folder, expanded)
             self._apply_filter()
+            if view is not None:
+                self._restore_grid_selection(keys, current)
             self._update_summary()
             notices = list(messages)
             if result.errors:
@@ -599,6 +630,7 @@ class MainWindow(QMainWindow):
             self.capture_cancel.hide()
 
     def _show_taken(self, dates):
+        dates = {key: date for key, date in dates.items() if key not in self.removed_capture_keys}
         changed = [key for key, taken in dates.items() if taken != self.model.taken.get(key)]
         self.model.taken.update(dates)
         if self._add_pairs(changed) and self.model.group_pairs:
@@ -689,6 +721,9 @@ class MainWindow(QMainWindow):
                     current = min(rows)
                 if current is not None:
                     selection.setCurrentIndex(self.model.index(current), QItemSelectionModel.SelectionFlag.NoUpdate)
+        self._refresh_grid_labels()
+
+    def _refresh_grid_labels(self):
         self.grid.viewport().update()
         self.visible_count.setText(f"{self.model.rowCount():,} files")
         self.preview_filter_dirty = False
@@ -708,10 +743,10 @@ class MainWindow(QMainWindow):
     def _update_summary(self):
         count = Counter()
         sizes = Counter()
-        for item in self.model.items:
-            if flag := self.model.flag_states.get(item.key):
-                count[flag] += 1
-                sizes[flag] += item.size
+        for key, status in self.model.flag_states.items():
+            if flag := self.flags.get(key):
+                count[status] += 1
+                sizes[status] += flag.size
         self.summary.setText(
             f"Upload {count['green']:,} ({bytes_label(sizes['green'])}) · "
             f"Delete {count['red']:,} ({bytes_label(sizes['red'])}) · "
@@ -830,7 +865,8 @@ class MainWindow(QMainWindow):
             previous_notice = self.local_flags_path
             self.local_flags_path = location if fallback else None
             if previous_notice or fallback:
-                self._set_notice()
+                messages = self.messages[1:] if previous_notice else self.messages
+                self._set_notice(messages)
             self.saved_revision = revision
             if self.saved_revision != self.revision:
                 self._start_save()
@@ -1002,7 +1038,7 @@ class MainWindow(QMainWindow):
             capture.save()
 
         def progress(values):
-            if self.capture is capture and not self.closing:
+            if self.capture_request == (worker, item.key) and self.capture is capture and not self.closing:
                 self._show_taken({item.key: values[0]})
 
         def finished(_result, _error):
@@ -1057,6 +1093,316 @@ class MainWindow(QMainWindow):
                 self._set_notice([f"Could not open the default app for {item.name}"])
 
         self._run("Preparing a copy for the default app", copy, display)
+
+    def _expanded_folders(self):
+        return {path for path in self.folder_model.nodes if self.tree.isExpanded(self.folder_model.index_for_path(path))}
+
+    def _rebuild_tree(self, folder, expanded):
+        with QSignalBlocker(self.tree.selectionModel()):
+            self.folder_model.rebuild(self.scan_result.directories, self.scan_result.archives)
+            while folder not in self.folder_model.nodes:
+                folder = folder.rpartition("/")[0]
+            self.folder = folder
+            for path in expanded:
+                self.tree.expand(self.folder_model.index_for_path(path))
+            self.tree.expand(self.folder_model.index_for_path(""))
+            select_folder(self.tree, folder)
+
+    def _restore_grid_selection(self, keys, current):
+        rows = {self.model.rows[key] for key in keys if key in self.model.rows}
+        current = self.model.rows.get(current, min(rows) if rows else None)
+        selection = self.grid.selectionModel()
+        with QSignalBlocker(selection):
+            selection.clear()
+            for row in sorted(rows):
+                selection.select(self.model.index(row), QItemSelectionModel.SelectionFlag.Select)
+            if current is not None:
+                index = self.model.index(current)
+                selection.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+                self.grid.scrollTo(index)
+        self._selected_count()
+
+    def _tree_menu(self, path):
+        menu = QMenu(self.tree)
+        menu.addAction("New folder…", partial(self._ask_new_folder, path)).setEnabled(
+            self.folder_model.is_real_folder(path))
+        movable = self.folder_model.is_movable(path)
+        menu.addAction("Rename…", partial(self._rename_tree_path, path)).setEnabled(movable)
+        menu.addAction("Move to…", partial(self._choose_tree_destination, path)).setEnabled(movable)
+        return menu
+
+    def _tree_context(self, point):
+        if not self._busy() and self.scan_result is not None:
+            path = self.tree.indexAt(point).data(FOLDER)
+            if self.folder_model.is_real_folder(path) or self.folder_model.is_movable(path):
+                menu = self._tree_menu(path)
+                menu.exec(self.tree.viewport().mapToGlobal(point))
+                menu.deleteLater()
+
+    def _grid_context(self, point):
+        index = self.grid.indexAt(point)
+        if self._busy() or not index.isValid():
+            return
+        if not self.grid.selectionModel().isSelected(index):
+            self.grid.setCurrentIndex(index)
+        menu = QMenu(self.grid)
+        menu.addAction("Move selected to folder…", self.choose_move_selected)
+        menu.exec(self.grid.viewport().mapToGlobal(point))
+        menu.deleteLater()
+
+    def _create_folder(self, parent, name):
+        path = create_folder(self.drive.root, parent, name)
+        self.scan_result.directories.add(path)
+        self._rebuild_tree(self.folder, self._expanded_folders() | {parent})
+        return path
+
+    def _ask_new_folder(self, parent):
+        if self._busy() or self.drive is None:
+            return
+        name = ask_name(self, "New folder", "Folder name")
+        if name is None:
+            return
+        try:
+            path = self._create_folder(parent, name)
+        except (OSError, ValueError) as error:
+            self._set_notice(["Could not create folder", str(error)])
+        else:
+            self._set_notice([f"Created folder {path}"])
+
+    def _real_parent(self, path):
+        while not self.folder_model.is_real_folder(path):
+            path = path.rpartition("/")[0]
+        return path
+
+    def _new_current_folder(self):
+        self._ask_new_folder(self._real_parent(self.folder))
+
+    def _choose_move_folder(self):
+        directories = {path for path in self.scan_result.directories if self.folder_model.is_real_folder(path)}
+        picker = FolderPicker(self, directories, self._real_parent(self.folder), self._create_folder)
+        try:
+            return picker.folder if picker.exec() == QDialog.DialogCode.Accepted else None
+        finally:
+            picker.deleteLater()
+
+    def _rename_tree_path(self, path):
+        parent, _, current = path.rpartition("/")
+        name = ask_name(self, "Rename", "New name", current)
+        if name is not None:
+            self._move_tree_path(path, parent, name=name)
+
+    def _choose_tree_destination(self, path):
+        if (destination := self._choose_move_folder()) is not None:
+            self._move_tree_path(path, destination)
+
+    def _move_tree_path(self, path, destination, *, name=None):
+        if self._busy() or not self.folder_model.is_movable(path):
+            return
+        root = self.drive.root
+        scanned = self.model.items
+        archive = None
+        if path in self.scan_result.archives:
+            archive = next((item for item in scanned if item.key == (path, "")), None)
+        self._run("Moving", lambda stop, _report: move_path(root, path, destination, name=name,
+                                                           item=archive, scanned=scanned, stop=stop),
+                  self._finish_organizing, finish_before_close=True)
+
+    def _selection_for_move(self):
+        items = self._selected_items()
+        if not items and (item := self._selected_item()) is not None:
+            items = [item]
+        return items
+
+    def _expand_pairs_for(self, items):
+        candidates = self.pair_candidates if self.model.group_pairs else {}
+        selected = {item.key: item for item in items}
+        pairs = dict.fromkeys(candidates[key] for key in selected if key in candidates)
+        known = {item.key: self.model.taken[item.key] for pair in pairs for item in pair.items
+                 if item.key in self.model.taken}
+        capture = self.capture
+
+        def collect(stop):
+            dates = known | read_pair_dates(capture, candidates, known, selected, stop) if pairs else known
+            groups = []
+            for pair in pairs:
+                if pair.matches(dates):
+                    selected.update((item.key, item) for item in pair.items)
+                    groups.append(tuple(item.key for item in pair.items))
+            return list(selected.values()), groups
+
+        return collect
+
+    def choose_move_selected(self):
+        if self._busy() or self.drive is None:
+            return
+        items = self._selection_for_move()
+        if items and (destination := self._choose_move_folder()) is not None:
+            self._move_selected_items(items, destination, confirm=True)
+
+    def _move_selected_items(self, items, destination, *, confirm=False):
+        if self._busy() or self.drive is None:
+            return
+        root = self.drive.root
+        collect = self._expand_pairs_for(items)
+        if confirm:
+            self._run("Checking selected files", lambda stop, _report: collect(stop),
+                      lambda result: self._confirm_folder_move(destination, *result))
+        else:
+            def move(stop, _report):
+                files, pairs = collect(stop)
+                return move_items(root, files, destination, stop, pairs=pairs)
+
+            self._run("Moving", move, self._finish_organizing, finish_before_close=True)
+
+    def choose_move_flagged(self, status):
+        if self._busy() or self.drive is None:
+            return
+        if (destination := self._choose_move_folder()) is None:
+            return
+        root, flags, hashes = self.drive.root, dict(self.flags), dict(self.hashes)
+
+        def collect(stop, _report):
+            items, errors = flagged_items(root, flags, status, stop, include_entries=False)
+            errors += [f"ZIP entry skipped: {flag.rel_path}::{flag.zip_entry}" for flag in flags.values()
+                       if flag.flag == status and flag.zip_entry]
+            eligible = []
+            for item in items:
+                flag = flags[item.key]
+                if flag.hash in ("", hashes.get(item.key, flag.hash)):
+                    eligible.append(item)
+                else:
+                    errors.append(f"File contents changed after review: {item.identity}")
+            return eligible, errors
+
+        self._run("Checking flagged files", collect,
+                  lambda result: self._confirm_folder_move(destination, result[0], errors=result[1]))
+
+    def _confirm_folder_move(self, destination, items, pairs=(), *, errors=()):
+        loose = []
+        errors = list(errors)
+        for item in items:
+            if item.zip_entry:
+                errors.append(f"ZIP entry skipped: {item.identity}")
+            elif item.folder == destination:
+                errors.append(f"The file is already in this folder: {item.rel_path}")
+            else:
+                loose.append(item)
+        if not loose:
+            self._set_notice(["Moved 0 files · 0 B", *errors])
+            return
+        total = bytes_label(sum(item.size for item in loose))
+        message = f"Move {len(loose):,} files ({total}) to {destination or 'All files'}?"
+        if errors:
+            message += f"\n{len(errors):,} paths will be skipped."
+        answer = QMessageBox.question(self, "Move to folder", message,
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                      QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            root = self.drive.root
+
+            def move(stop, _report):
+                result = move_items(root, loose, destination, stop, pairs=pairs)
+                result.errors[:0] = errors
+                return result
+
+            self._run("Moving", move, self._finish_organizing, finish_before_close=True)
+
+    def _finish_organizing(self, result):
+        messages = [f"Moved {result.moved:,} files · {bytes_label(result.size)}", *result.errors]
+        self._set_notice(messages)
+        if not result.mapping:
+            return
+        self._cancel_capture_pass(detach=True)
+        self._cancel_preview_taken()
+        self.flags = remap_flags(self.flags, result.mapping)
+        self.cleared_choices = {
+            (remap_path(raw, result.mapping), raw_entry, remap_path(jpg, result.mapping), jpg_entry, *stamps): choice
+            for (raw, raw_entry, jpg, jpg_entry, *stamps), choice in self.cleared_choices.items()
+        }
+        self._dirty()
+        if not self.closing:
+            def remap_key(item):
+                return (remap_path(item.rel_path, result.mapping), item.zip_entry)
+
+            current = self._selected_item()
+            view = (remap_path(self.folder, result.mapping), [remap_key(item) for item in self._selected_items()],
+                    remap_key(current) if current else None,
+                    {remap_path(path, result.mapping) for path in self._expanded_folders()})
+            self._after_flags_saved(lambda: self._scan_root(self.drive.root, messages, view=view))
+
+    def quarantine_selected(self):
+        if self._busy() or self.drive is None:
+            return
+        items = self._selection_for_move()
+        if not items:
+            return
+        drive = self.drive
+        collect = self._expand_pairs_for(items)
+        if (self.quick_look.isVisible() and self.quick_look.media is not None
+                and self.quick_look.stack.currentWidget() is self.quick_look.media):
+            self.quick_look.clear()
+            self.quick_look.item = None
+
+        def move(stop, report):
+            selected, _pairs = collect(stop)
+            skipped = [f"ZIP entry skipped: {item.identity}" for item in selected if item.zip_entry]
+            loose = [item for item in selected if not item.zip_entry]
+            try:
+                result = quarantine_items(drive.root, loose, stop, report)
+            except (OSError, ValueError) as error:
+                return MoveResult(0, 0, [*skipped, str(error)])
+            result.errors[:0] = skipped
+            if result.moved_paths:
+                try:
+                    self.index.forget_paths(drive.id, result.moved_paths)
+                except SQLiteError as error:
+                    result.errors.append(f"Could not update the local file index: {error}")
+            return result
+
+        self._run("Moving to quarantine", move, self._finish_quarantine_selected, self._work_progress,
+                  finish_before_close=True)
+
+    def _finish_quarantine_selected(self, result):
+        self._set_notice([f"Moved {result.moved:,} files to quarantine · Restore from Owner menu", *result.errors])
+        if not result.moved_paths:
+            self._sync_preview()
+            return
+        paths = set(result.moved_paths)
+        keys = {item.key for item in self.model.items if item.rel_path in paths}
+        for key in keys:
+            self.hashes.pop(key, None)
+            if pair := self.pair_candidates.pop(key, None):
+                for member in pair.items:
+                    self.pair_candidates.pop(member.key, None)
+                self.cleared_choices.pop(pair.stamp, None)
+        self.flags = {key: flag for key, flag in self.flags.items() if flag.rel_path not in paths}
+        self.removed_capture_keys.update(keys)
+        archive_paths = self.scan_result.archives & paths
+        if archive_paths:
+            self.scan_result.archives.difference_update(archive_paths)
+            removed_prefixes = dict.fromkeys(archive_paths, "")
+            self.scan_result.directories = {path for path in self.scan_result.directories
+                                            if remap_path(path, removed_prefixes) == path}
+            self._rebuild_tree(self.folder, self._expanded_folders())
+        selection = self.grid.selectionModel()
+        previous = selection.currentIndex()
+        previous_item, previous_row = previous.data(ITEM), previous.row()
+        with QSignalBlocker(selection):
+            partial_pair = self.model.remove_items(keys)
+            if partial_pair or archive_paths or self.preview_filter_dirty:
+                self.model.filter(self.folder, self.category.currentData(), self.flag_filter.currentData(),
+                                  self.search.text(), self.sort.currentData(), incremental=True)
+            if self.model.rowCount() and (previous_item is None or previous_item.key not in self.model.rows):
+                row = max(0, min(previous_row, self.model.rowCount() - 1))
+                selection.setCurrentIndex(self.model.index(row), QItemSelectionModel.SelectionFlag.ClearAndSelect)
+            elif self.model.rowCount() and not selection.hasSelection():
+                selection.select(selection.currentIndex(), QItemSelectionModel.SelectionFlag.Select)
+        self.quarantine_count += result.moved
+        self.quarantine_size += result.size
+        self._refresh_grid_labels()
+        self._update_summary()
+        self._dirty()
+        self._start_save()
 
     def confirm_quarantine(self):
         if self._busy() or self.drive is None:

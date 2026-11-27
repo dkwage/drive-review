@@ -22,7 +22,7 @@ WM_KEYDOWN = 0x0100
 E_NOINTERFACE = -2147467262
 E_NOTIMPL = -2147467263
 PREVIEW_KEYS = {
-    0x1B: "Escape", 0x20: "Space", 0x25: "Left", 0x26: "Up", 0x27: "Right", 0x28: "Down",
+    0x1B: "Escape", 0x20: "Space", 0x25: "Left", 0x26: "Up", 0x27: "Right", 0x28: "Down", 0x2E: "Delete",
     ord("Z"): "Z", ord("X"): "X", ord("C"): "C", ord("R"): "R",
 }
 
@@ -155,7 +155,8 @@ class _PreviewFrame:
             if not stop.is_set() and message and message.contents.message == WM_KEYDOWN:
                 key = PREVIEW_KEYS.get(message.contents.wParam)
                 if key and not any(get_key_state(modifier) < 0 for modifier in (0x11, 0x12, 0x5B, 0x5C)):
-                    on_key(key)
+                    if key != "Delete" or not message.contents.lParam & (1 << 30):
+                        on_key(key)
                     return 0  # S_OK
             return 1  # S_FALSE
 

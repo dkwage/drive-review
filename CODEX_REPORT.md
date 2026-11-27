@@ -67,3 +67,23 @@ OK
 - All 42 baseline tests and 12 new tests passed on macOS 27.0.1 arm64 with Python 3.12.16 in the existing uv-managed `.venv`.
 - Added coverage for pairing rules and ZIP boundaries, EXIF tags and SQLite migration, legacy and current CSVs, selection across merges, thumbnail and badge text, Quick Look, multi-selection shortcuts, filters and counts, remembered grouping, and duplicate and quarantine behavior while capture dates are pending.
 - Native Windows UI and standalone RS Uploader verification remain pending.
+
+## v5 organization, keyboard quarantine, and Adobe previews
+
+The Organize menu, grid context menu, and folder tree support source-local moves. The folder picker can create folders and omits ZIP entries. Moves preserve flags by path, including member flags in a moved ZIP. Dragging or moving a selected RAW+JPG tile uses a shared collision suffix for the two files. Flagged moves work across the source and follow the individual CSV flags.
+
+**Delete** and macOS **Backspace** use reversible quarantine from the grid and Quick Look. The worker reports successful paths, which the UI removes from the grid and local file index without rescanning. Failed paths remain available for review. The status bar updates the quarantine count and size, and the Owner menu can restore the files.
+
+Design previews scan the first and last 8 MiB for XMP JPEG thumbnails. Additional providers include Photoshop composites, page one of PDF-compatible Illustrator files, bounded IDML metadata reads, and binary EPS TIFF previews. Automatic thumbnails for ZIP entries use the existing 64 MiB limit.
+
+```text
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -v
+Ran 77 tests in 5.195s
+
+OK
+```
+
+- All 54 existing tests and 23 new tests passed on macOS 27.0.1 arm64 with Python 3.12.16.
+- New tests cover no-overwrite moves, path validation and changed files, pair collision and rollback behavior, ZIP flag remapping, folder creation and picker actions, tree and grid drop handling, both flagged move actions, in-place quarantine including partial failures, and budgeted Adobe thumbnail extraction and previews.
+- The offscreen `main.py` launch indexed a loose file, a ZIP archive, and a ZIP entry.
+- Native Windows drag-and-drop, Explorer preview handlers, and removable-volume behavior remain pending. The offscreen tests exercise Qt drop handlers and preview workers.

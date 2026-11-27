@@ -18,6 +18,8 @@ Extract `DriveReview-Windows.zip` and run `DriveReview.exe` from the extracted `
 | X | Flag for **Delete** (red) |
 | C | Clear the flag |
 | R | Cycle the upload choice for selected RAW+JPG pairs |
+| M | Move the selected tiles to a folder in the open source |
+| Delete (or Backspace on macOS) | Move selected loose files to quarantine immediately |
 | Arrow keys | Move the grid selection |
 | Space | Open or close Quick Look |
 | Esc | Close Quick Look |
@@ -33,6 +35,15 @@ The tile and Quick Look show the JPG or HEIF image. Search matches either file n
 
 **Z** flags the current upload choice, which defaults to **JPG**. **R** cycles **JPG → RAW → RAW+JPG → JPG** and flags the chosen files for upload, including on an unflagged pair. It works on all selected pairs in the grid and Quick Look. The upload tile shows **↑ JPG**, **↑ RAW**, or **↑ RAW+JPG**. The other file stays unflagged when you choose just one. **X** flags both files for deletion. **C** clears both flags and keeps the upload choice.
 
+### Organize files and folders
+
+- Drag a folder or ZIP archive from the folder tree onto another real folder. You can drop onto **All files** to move to the source root. Right-click a folder for **New folder…**, **Rename…**, or **Move to…**. A ZIP can be renamed or moved as a whole while its entries stay inside.
+- Drag selected grid tiles onto a tree folder, or choose **Organize → Move selected to folder…** with **M** or the grid's right-click menu. Both files in a RAW+JPG tile move together.
+- **Organize → Move Upload files to folder…** and **Move Delete files to folder…** use the loose files flagged with that color across the source. The dialog shows the file count and size before you confirm. Files go directly into the chosen folder. Individual ZIP entries are reported as skipped.
+- The folder picker stays within the selected source and includes a **New folder** button. **Organize → New folder…** also creates a folder in the current location. Name collisions add a numeric suffix such as `photo (2).jpg`. Flags follow renamed or moved files and folders, including flags on entries inside a moved ZIP.
+
+Press **Delete** in the grid or Quick Look for immediate, reversible quarantine. **Backspace** does the same on macOS. Both files in a RAW+JPG tile are included and individual ZIP entries are skipped. The grid advances to the next tile when the current file moves. Use **Owner → Restore quarantined files…** to bring back the files.
+
 ### Quick Look
 
 Press Space on a selected tile. The panel shows the name, size, **Taken** date when available, file creation and modification dates, path, flag, and position in the current grid. It remembers its size. The arrow keys move the grid selection while the panel is open. Z, X, and C apply to the current tile and have matching buttons. On a pair, the **Upload** control selects **JPG**, **RAW**, or **RAW+JPG** directly and flags that choice for upload.
@@ -42,6 +53,7 @@ Press Space on a selected tile. The panel shows the name, size, **Taken** date w
 - Images open at full resolution where a decoder is available and fit the window by default. Use the mouse wheel or **+** and **−** to zoom. Click **Fit** to reset the zoom. The Windows Shell can supply a large thumbnail for RAW and other formats with an installed codec.
 - Play video and audio inline. Press **K** or click **Play** or **Pause**. The controls include seeking, elapsed time, volume, and mute.
 - Scroll through PDFs and see the current page and page count.
+- Design files such as Photoshop, Illustrator, InDesign, and EPS can show embedded thumbnails in the grid and Quick Look. Drive Review reads embedded XMP JPEGs, renders the first page of PDF-compatible Illustrator files, and can use a TIFF preview from binary EPS files. Design files inside ZIPs use the same preview methods. Automatic grid thumbnails use the 64 MiB ZIP entry limit.
 - Office and other supported formats use the preview handler registered with Windows Explorer. When a handler is unavailable, Quick Look can show text from Word, PowerPoint, and Excel Open XML files. Plain text, CSV, JSON, Markdown, and code open in a read-only monospaced view.
 - When an inline viewer is unavailable, use **Open with default app**. ZIP entries use the same viewers as loose files, with a local temporary copy when a viewer needs a file path. Large entries need enough local free space.
 
@@ -90,7 +102,7 @@ On a read-only drive, the app saves flags locally and shows the CSV location. Th
 - Keeper suggestions favor files outside system folders, loose files, shallower paths, older modification times, and shorter names, in that order. Manual decisions are preserved. An off-drive keeper qualifies for automatic deletion of a local copy only when the index records the keeper as flagged Upload. With byte comparison enabled, the keeper must also be readable.
 - ZIP listing reads the central directory. Encrypted, damaged, and unsafe archives appear as files with a warning. Grid thumbnails skip ZIP videos and entries over 64 MiB. Quick Look loads an explicitly selected entry on demand.
 - The upload manifest records actual output paths. If the ZIP entry directory name collides with a top-level file, Drive Review adds a numeric suffix. A source with the top-level name `manifest.csv` is staged under `_drive_review_sources/`.
-- Moves and permanent deletions record intent ahead of file operations in `_drive_review/quarantine_log.csv`. Restore refuses to overwrite an existing file. Native preview handlers and default apps receive local copies to protect source files.
+- Quarantine moves and permanent deletions record intent ahead of file operations in `_drive_review/quarantine_log.csv`. Restore refuses to overwrite an existing file. Native preview handlers and default apps receive local copies to protect source files.
 
 ## Development and builds
 

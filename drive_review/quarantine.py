@@ -33,6 +33,7 @@ class MoveResult:
     moved: int
     size: int
     errors: list[str]
+    moved_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +172,8 @@ def quarantine_items(root, items, stop=None, progress=lambda count, total: None)
             except (OSError, ValueError) as error:
                 errors.append(f"{rel_path}: {error}")
         write_log(log, rows)
-        moved = size = 0
+        moved_paths = []
+        size = 0
         try:
             for count, row in enumerate(work, 1):
                 if stop is not None and stop.is_set():
@@ -185,15 +187,19 @@ def quarantine_items(root, items, stop=None, progress=lambda count, total: None)
                     move_no_replace(source, target)
                     row.state = "quarantined"
                     row.moved_at_iso = now()
-                    moved += 1
+                    moved_paths.append(row.rel_path)
                     size += row.size
                 except (OSError, ValueError) as error:
                     errors.append(f"{row.rel_path}: {error}")
                 if count % 64 == 0 or count == len(work):
                     progress(count, len(work))
         finally:
-            write_log(log, rows)
-    return MoveResult(moved, size, errors)
+            try:
+                write_log(log, rows)
+            except OSError as error:
+                # The planned rows on disk still let Restore find the moved files.
+                errors.append(f"Could not finalize the quarantine log: {error}")
+    return MoveResult(len(moved_paths), size, errors, tuple(moved_paths))
 
 
 def undo_quarantine(root, stop=None, progress=lambda count, total: None):

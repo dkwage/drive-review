@@ -115,6 +115,11 @@ class Index:
                 db.executemany("INSERT INTO cleared_pair_choices VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                                [(drive.id, *stamp, choice) for stamp, choice in cleared_choices.items()])
 
+    def forget_paths(self, drive_id, paths):
+        with self.connect() as db:
+            db.executemany("DELETE FROM files WHERE drive_id = ? AND rel_path = ?",
+                           [(drive_id, path) for path in paths])
+
     def cleared_pair_choices(self, drive_id):
         with self.connect() as db:
             rows = db.execute("""SELECT raw_path, raw_entry, jpg_path, jpg_entry, raw_stamp, jpg_stamp, choice

@@ -1,3 +1,4 @@
+from base64 import b64encode
 from io import BytesIO
 import os
 from pathlib import Path
@@ -13,10 +14,10 @@ from zipfile import ZipFile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
-from PySide6.QtCore import QEventLoop, QItemSelection, QItemSelectionModel, QRect, QTimer, Qt
+from PySide6.QtCore import QEventLoop, QItemSelection, QItemSelectionModel, QPointF, QRect, QTimer, Qt
 from PySide6.QtGui import QFont, QImage, QPainter, QPdfWriter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit, QMessageBox, QStyleOptionViewItem
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QLineEdit, QMessageBox, QPushButton, QStyleOptionViewItem
 
 from drive_review.capture import read_item_taken
 from drive_review.drives import identify_drive
@@ -24,6 +25,9 @@ from drive_review.flags import Flag, FlagStore, read_flags
 from drive_review.items import bytes_label
 from drive_review.quarantine import QUARANTINE, quarantine_items
 from drive_review.scan import flagged_items, scan
+from drive_review.thumbs import ThumbnailCache
+from drive_review.ui.models import FOLDER
+from drive_review.ui.organizer import MOVE_MIME, FolderPicker, select_folder
 from drive_review.ui.window import MainWindow
 
 
@@ -614,6 +618,305 @@ class ReviewSmokeTests(unittest.TestCase):
                 path, contents = copies[0]
                 self.assertEqual(contents, document.read_bytes())
                 self.assertFalse(path.exists())
+            finally:
+                window.close()
+                self.wait_until(lambda: not window.isVisible())
+
+    def test_delete_key_quarantines_pair_without_confirmation_or_rescan(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "drive"
+            root.mkdir()
+            write_pair(root, "a")
+            (root / "b-next.txt").write_bytes(b"next")
+            bytes_moved = sum((root / name).stat().st_size for name in ("a.CR2", "a.JPG"))
+            window = MainWindow(base / "local", list_drives=False)
+            window.show()
+            removed, resets = [], []
+            try:
+                window.open_root(root)
+                self.wait_until(lambda: not window._busy() and window.capture_pass is None)
+                window.model.rowsRemoved.connect(lambda *_: removed.append(True))
+                window.model.modelReset.connect(lambda: resets.append(True))
+                window.grid.setCurrentIndex(window.model.index(0))
+                window.grid.setFocus()
+                QTest.keyClick(window.grid, Qt.Key.Key_X)
+                self.assertEqual(len(window.flags), 2)
+                with patch("drive_review.ui.window.scan") as rescan, patch.object(QMessageBox, "question") as confirm:
+                    QTest.keyClick(window.grid, Qt.Key.Key_Delete)
+                    self.wait_until(lambda: window.quarantine_count == 2 and window.saved_revision == window.revision)
+                    rescan.assert_not_called()
+                    confirm.assert_not_called()
+                self.assertEqual((removed, resets), ([True], []))
+                self.assertEqual(window.model.rowCount(), 1)
+                self.assertEqual(window.grid.currentIndex().data(), "b-next.txt")
+                self.assertEqual(window.model.pairs, {})
+                self.assertEqual(window.model.flag_states, {})
+                self.assertEqual(read_flags(root / "_drive_review/flags.csv"), {})
+                for name in ("a.CR2", "a.JPG"):
+                    self.assertFalse((root / name).exists())
+                    self.assertTrue((root / QUARANTINE / name).is_file())
+                    self.assertNotIn((name, ""), window.index.cached(window.drive.id))
+                self.assertIn(f"In quarantine 2 ({bytes_label(bytes_moved)})", window.summary.text())
+                self.assertEqual(window.notice_text.text(), "Moved 2 files to quarantine · Restore from Owner menu")
+            finally:
+                window.close()
+                self.wait_until(lambda: not window.isVisible())
+
+    def test_quick_look_delete_skips_zip_and_keeps_changed_pair_member(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "drive"
+            root.mkdir()
+            write_pair(root, "a")
+            with ZipFile(root / "archive.zip", "w") as archive:
+                archive.writestr("entry.txt", b"entry")
+            window = MainWindow(base / "local", list_drives=False)
+            window.show()
+            try:
+                window.open_root(root)
+                self.wait_until(lambda: not window._busy() and window.capture_pass is None)
+                window.grid.setCurrentIndex(window.model.index(window.model.rows["a.JPG", ""]))
+                window.mark_selected("red")
+                (root / "a.CR2").write_bytes(b"changed after scan")
+                entry = window.model.index(window.model.rows["archive.zip", "entry.txt"])
+                window.grid.selectionModel().select(entry, QItemSelectionModel.SelectionFlag.Select)
+                window.preview_selected()
+                with patch("drive_review.ui.window.scan") as rescan:
+                    key = Qt.Key.Key_Backspace if sys.platform == "darwin" else Qt.Key.Key_Delete
+                    QTest.keyClick(window.quick_look, key)
+                    self.wait_until(lambda: window.quarantine_count == 1 and not window._busy())
+                    rescan.assert_not_called()
+                self.assertEqual(window.quick_look.item.key, ("a.CR2", ""))
+                self.assertIn(("a.CR2", ""), window.model.rows)
+                self.assertIn(("archive.zip", "entry.txt"), window.model.rows)
+                self.assertEqual(window.model.flag_states, {("a.CR2", ""): "red"})
+                self.assertTrue((root / QUARANTINE / "a.JPG").exists())
+                self.assertTrue((root / "a.CR2").exists())
+                self.assertTrue(window.details.isVisible())
+                self.assertTrue(any("ZIP entry skipped" in message for message in window.messages))
+                self.assertTrue(any("changed after review" in message for message in window.messages))
+            finally:
+                window.close()
+                self.wait_until(lambda: not window.isVisible())
+
+    def test_organize_m_shortcut_opens_picker_and_moves_pair_with_flags(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "drive"
+            root.mkdir()
+            write_pair(root, "a")
+            (root / "target").mkdir()
+            Image.new("RGB", (4, 4), "green").save(root / "target/a.JPG")
+            existing = (root / "target/a.JPG").read_bytes()
+            window = MainWindow(base / "local", list_drives=False)
+            window.show()
+
+            opened = []
+
+            def select_target(picker):
+                opened.append(True)
+                select_folder(picker.tree, "target")
+                return QDialog.DialogCode.Accepted
+
+            try:
+                window.open_root(root)
+                self.wait_until(lambda: not window._busy() and window.capture_pass is None)
+                window.grid.setCurrentIndex(window.model.index(window.model.rows["a.JPG", ""]))
+                window.grid.setFocus()
+                QTest.keyClick(window.grid, Qt.Key.Key_Z)
+                with patch.object(FolderPicker, "exec", select_target), \
+                        patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes) as confirm:
+                    QTest.keyClick(window.grid, Qt.Key.Key_M)
+                    self.wait_until(lambda: ("target/a (2).JPG", "") in window.model.rows
+                                    and not window._busy() and window.capture_pass is None)
+                    self.assertEqual(opened, [True])
+                    self.assertIn("Move 2 files", confirm.call_args.args[2])
+                self.assertEqual(window.folder, "")
+                self.assertEqual(window.grid.currentIndex().data(), "a (2).JPG")
+                self.assertEqual(window.model.rows["target/a (2).JPG", ""],
+                                 window.model.rows["target/a (2).CR2", ""])
+                self.assertEqual(window.model.flag_states, {("target/a (2).JPG", ""): "green"})
+                self.assertEqual((root / "target/a.JPG").read_bytes(), existing)
+                self.assertEqual(read_flags(root / "_drive_review/flags.csv"), window.flags)
+            finally:
+                window.close()
+                self.wait_until(lambda: not window.isVisible())
+
+    def test_flagged_moves_use_all_flags_and_skip_zip_entries(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "drive"
+            (root / "album").mkdir(parents=True)
+            (root / "target").mkdir()
+            (root / "album/green.txt").write_bytes(b"green")
+            (root / ".DS_Store").write_bytes(b"hidden")
+            (root / "root-red.txt").write_bytes(b"red")
+            with ZipFile(root / "archive.zip", "w") as archive:
+                archive.writestr("inside.txt", b"inside")
+            flags = {}
+            for item in scan(root, show_hidden=True).items:
+                status = "red" if item.name == "root-red.txt" else "green"
+                if item.name != "archive.zip":
+                    flags[item.key] = Flag.for_item(item, status, "manual", "reviewer")
+            FlagStore(identify_drive(root), base / "local").save(flags)
+            window = MainWindow(base / "local", list_drives=False)
+            window.show()
+            try:
+                window.open_root(root)
+                self.wait_until(lambda: not window._busy())
+                select_folder(window.tree, "album")
+                actions = window.organize_menu.actions()
+                self.assertEqual([action.text() for action in actions], [
+                    "Move selected to folder…", "Move Upload files to folder…",
+                    "Move Delete files to folder…", "New folder…",
+                ])
+                with patch.object(window, "_choose_move_folder", return_value="target"), \
+                        patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes) as confirm:
+                    actions[1].trigger()
+                    self.wait_until(lambda: (root / "target/green.txt").exists() and not window._busy())
+                    self.assertEqual(window.folder, "album")
+                    self.assertTrue((root / "target/.DS_Store").is_file())
+                    self.assertIn("Move 2 files (11 B)", confirm.call_args.args[2])
+                    self.assertTrue(window.details.isVisible())
+                    self.assertIn("ZIP entry skipped: archive.zip::inside.txt", window.messages)
+                    actions[2].trigger()
+                    self.wait_until(lambda: (root / "target/root-red.txt").exists() and not window._busy())
+                    self.assertIn("Move 1 file", confirm.call_args.args[2])
+                self.assertEqual({key: flag.flag for key, flag in window.flags.items()}, {
+                    ("target/green.txt", ""): "green", ("target/.DS_Store", ""): "green",
+                    ("target/root-red.txt", ""): "red", ("archive.zip", "inside.txt"): "green",
+                })
+                self.assertEqual(read_flags(root / "_drive_review/flags.csv"), window.flags)
+            finally:
+                window.close()
+                self.wait_until(lambda: not window.isVisible())
+
+    def test_tree_context_picker_and_drop_targets(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "drive"
+            (root / "album").mkdir(parents=True)
+            (root / "target").mkdir()
+            (root / "album/photo.txt").write_bytes(b"photo")
+            with ZipFile(root / "archive.zip", "w") as archive:
+                archive.writestr("member/inside.txt", b"inside")
+            window = MainWindow(base / "local", list_drives=False)
+            window.show()
+
+            class Drop:
+                def __init__(self, source, path):
+                    self.origin = source
+                    self.point = window.tree.visualRect(window.folder_model.index_for_path(path)).center()
+                    self.accepted = False
+
+                def source(self):
+                    return self.origin
+
+                def position(self):
+                    return QPointF(self.point)
+
+                def mimeData(self):
+                    return self
+
+                def hasFormat(self, name):
+                    return name == MOVE_MIME
+
+                def acceptProposedAction(self):
+                    self.accepted = True
+
+                def ignore(self):
+                    self.accepted = False
+
+            try:
+                window.open_root(root)
+                self.wait_until(lambda: not window._busy())
+                for path, enabled in (("", [True, False, False]), ("album", [True, True, True]),
+                                      ("archive.zip", [False, True, True])):
+                    actions = window._tree_menu(path).actions()
+                    self.assertEqual([action.text() for action in actions], ["New folder…", "Rename…", "Move to…"])
+                    self.assertEqual([action.isEnabled() for action in actions], enabled)
+                self.assertFalse(window.folder_model.is_real_folder("archive.zip/member"))
+
+                def create_and_choose(picker):
+                    self.assertNotIn("archive.zip", picker.model.nodes)
+                    select_folder(picker.tree, "target")
+                    button = next(button for button in picker.findChildren(QPushButton) if button.text() == "New folder")
+                    with patch("drive_review.ui.organizer.ask_name", return_value="new"):
+                        button.click()
+                    self.assertEqual(picker.tree.currentIndex().data(FOLDER), "target/new")
+                    return QDialog.DialogCode.Accepted
+
+                with patch.object(FolderPicker, "exec", create_and_choose):
+                    self.assertEqual(window._choose_move_folder(), "target/new")
+                self.assertTrue((root / "target/new").is_dir())
+
+                select_folder(window.tree, "album")
+                window.tree.drag_path = "album"
+                invalid = Drop(window.tree, "archive.zip")
+                window.tree.dropEvent(invalid)
+                self.assertFalse(invalid.accepted)
+                valid = Drop(window.tree, "target")
+                window.tree.dropEvent(valid)
+                self.assertTrue(valid.accepted)
+                self.wait_until(lambda: window.folder == "target/album" and not window._busy())
+                self.assertTrue((root / "target/album/photo.txt").is_file())
+
+                window.grid.setCurrentIndex(window.model.index(0))
+                window.grid.drag_items = window._selected_items()
+                drop = Drop(window.grid, "")
+                window.tree.dropEvent(drop)
+                self.assertTrue(drop.accepted)
+                self.wait_until(lambda: (root / "photo.txt").exists() and not window._busy())
+
+                member_key = ("archive.zip", "member/inside.txt")
+                select_folder(window.tree, "archive.zip/member")
+                window.grid.setCurrentIndex(window.model.index(window.model.rows[member_key]))
+                window.mark_selected("green")
+                with patch("drive_review.ui.window.ask_name", return_value="renamed.zip"):
+                    window._tree_menu("archive.zip").actions()[1].trigger()
+                    self.wait_until(lambda: window.folder == "renamed.zip/member" and not window._busy())
+                self.assertEqual(window.grid.currentIndex().data(), "inside.txt")
+                self.assertEqual(window.model.flag_states, {("renamed.zip", "member/inside.txt"): "green"})
+            finally:
+                window.close()
+                self.wait_until(lambda: not window.isVisible())
+
+    def test_quick_look_and_grid_preview_design_files(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "drive"
+            root.mkdir()
+            path = root / "a-pdf.ai"
+            writer = QPdfWriter(str(path))
+            painter = QPainter(writer)
+            painter.drawText(500, 500, "First page")
+            painter.end()
+            del writer
+            jpeg = BytesIO()
+            Image.new("RGB", (30, 12), "blue").save(jpeg, format="JPEG")
+            xmp = b"<xmpGImg:image>" + b64encode(jpeg.getvalue()) + b"</xmpGImg:image>"
+            with ZipFile(root / "design.zip", "w") as archive:
+                archive.writestr("b-design.indd", xmp)
+            window = MainWindow(base / "local", list_drives=False)
+            window.show()
+            preview = window.quick_look
+            try:
+                window.open_root(root)
+                self.wait_until(lambda: not window._busy())
+                window.grid.setCurrentIndex(window.model.index(window.model.rows["a-pdf.ai", ""]))
+                window.preview_selected()
+                self.wait_until(lambda: preview.stack.currentWidget() is preview.image)
+                bounds = preview.image.scene().sceneRect()
+                self.assertEqual(max(bounds.width(), bounds.height()), 2048)
+                item = preview.item
+                thumbnail = ThumbnailCache(base / "test-thumbs").get(window.drive, item, 128)
+                with Image.open(BytesIO(thumbnail)) as image:
+                    self.assertEqual(max(image.size), 128)
+                window.grid.setCurrentIndex(window.model.index(window.model.rows["design.zip", "b-design.indd"]))
+                self.wait_until(lambda: preview.stack.currentWidget() is preview.image)
+                bounds = preview.image.scene().sceneRect()
+                self.assertEqual((bounds.width(), bounds.height()), (30, 12))
             finally:
                 window.close()
                 self.wait_until(lambda: not window.isVisible())

@@ -1,6 +1,7 @@
 """Lightweight list and folder-tree models."""
 
 from dataclasses import dataclass, field
+from itertools import groupby
 
 from PySide6.QtCore import QAbstractItemModel, QAbstractListModel, QModelIndex, Qt
 from PySide6.QtWidgets import QApplication, QStyle
@@ -27,6 +28,10 @@ class ReviewModel(QAbstractListModel):
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.visible)
+
+    def flags(self, index):
+        flags = super().flags(index)
+        return flags | Qt.ItemFlag.ItemIsDragEnabled if index.isValid() else flags
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or not 0 <= index.row() < len(self.visible):
@@ -74,7 +79,7 @@ class ReviewModel(QAbstractListModel):
             return " · ".join(dict.fromkeys(label for label in labels if label))
         return self.duplicates.get(item.key)
 
-    def filter(self, folder, category, flag, search, sort):
+    def filter(self, folder, category, flag, search, sort, *, incremental=False):
         text = search.strip().casefold()
         matches = []
         prefix = folder + "/"
@@ -113,6 +118,21 @@ class ReviewModel(QAbstractListModel):
             matches.sort(key=lambda item: item.name.casefold())
 
         reset = matches != self.visible
+        if reset and incremental:
+            self._remove_rows({item.key for item in self.visible} - {item.key for item in matches})
+            existing = {item.key for item in self.visible}
+            for present, rows in groupby(enumerate(matches), lambda row: row[1].key in existing):
+                if not present:
+                    inserted = list(rows)
+                    first, last = inserted[0][0], inserted[-1][0]
+                    self.beginInsertRows(QModelIndex(), first, last)
+                    self.visible[first:first] = [item for _, item in inserted]
+                    self.endInsertRows()
+            if matches != self.visible:
+                self._reorder(matches)
+            else:
+                self._index_rows()
+            return False
         if reset:
             self.beginResetModel()
         self.visible = matches
@@ -120,6 +140,32 @@ class ReviewModel(QAbstractListModel):
         if reset:
             self.endResetModel()
         return reset
+
+    def _remove_rows(self, keys):
+        rows = [row for row, item in enumerate(self.visible) if item.key in keys]
+        for _, group in groupby(enumerate(reversed(rows)), lambda row: sum(row)):
+            run = [row for _, row in group]
+            first, last = run[-1], run[0]
+            self.beginRemoveRows(QModelIndex(), first, last)
+            del self.visible[first:last + 1]
+            self.endRemoveRows()
+
+    def remove_items(self, keys):
+        affected = {self.pairs[key] for key in keys if key in self.pairs}
+        partial = False
+        for pair in affected:
+            self.pair_choices.pop(pair.jpg.key, None)
+            for member in pair.items:
+                self.pairs.pop(member.key, None)
+                partial |= self.group_pairs and member.key not in keys
+        self.items[:] = [item for item in self.items if item.key not in keys]
+        for key in keys:
+            self.flag_states.pop(key, None)
+            self.taken.pop(key, None)
+            self.duplicates.pop(key, None)
+        self._remove_rows(keys)
+        self._index_rows()
+        return partial
 
     def _index_rows(self):
         self.rows = {}
@@ -134,8 +180,10 @@ class ReviewModel(QAbstractListModel):
 
     def sort_taken(self):
         matches = sorted(self.visible, key=self._taken_order)
-        if matches == self.visible:
-            return
+        if matches != self.visible:
+            self._reorder(matches)
+
+    def _reorder(self, matches):
         self.layoutAboutToBeChanged.emit()
         previous = self.persistentIndexList()
         keys = [self.visible[index.row()].key for index in previous]
@@ -189,6 +237,28 @@ class FolderModel(QAbstractItemModel):
         self.beginResetModel()
         self.root, self.nodes, self.archives = root, nodes, archives
         self.endResetModel()
+
+    def index_for_path(self, path):
+        node = self.nodes.get(path)
+        return self.createIndex(node.row, 0, node) if node is not None else QModelIndex()
+
+    def is_real_folder(self, path):
+        if path not in self.nodes:
+            return False
+        while path:
+            if path in self.archives:
+                return False
+            path = path.rpartition("/")[0]
+        return True
+
+    def is_movable(self, path):
+        return bool(path) and (path in self.archives or self.is_real_folder(path))
+
+    def flags(self, index):
+        flags = super().flags(index)
+        if index.isValid() and self.is_movable(index.data(FOLDER)):
+            flags |= Qt.ItemFlag.ItemIsDragEnabled
+        return flags
 
     def index(self, row, column, parent=QModelIndex()):
         if column != 0 or row < 0:

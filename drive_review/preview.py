@@ -17,7 +17,7 @@ from .items import category_for
 from .paths import display_path
 from .preview_text import OFFICE_EXTRACTORS, office_text, plain_text
 from .preview_windows import handler_for
-from .thumbs import copy_for_view
+from .thumbs import copy_for_view, design_thumbnail
 from .thumbs_windows import shell_thumbnail
 from .zipsource import open_item, validate_item
 
@@ -31,6 +31,7 @@ else:
 
 class PreviewKind(Enum):
     IMAGE = "image"
+    DESIGN = "design"
     VIDEO = "video"
     AUDIO = "audio"
     PDF = "pdf"
@@ -62,9 +63,8 @@ def preview_kind(name):
     if extension[1:] in TEXT_EXTENSIONS or filename in TEXT_FILENAMES:
         return PreviewKind.TEXT
     category = category_for(filename)
-    return {"Image": PreviewKind.IMAGE, "Video": PreviewKind.VIDEO, "Music": PreviewKind.AUDIO}.get(
-        category, PreviewKind.OTHER
-    )
+    return {"Image": PreviewKind.IMAGE, "Design": PreviewKind.DESIGN,
+            "Video": PreviewKind.VIDEO, "Music": PreviewKind.AUDIO}.get(category, PreviewKind.OTHER)
 
 
 @dataclass(slots=True)
@@ -127,7 +127,10 @@ def load_preview(root, item, gui_thread, stop, progress, *, use_handler=True):
         return path
 
     try:
-        if kind in {PreviewKind.OFFICE, PreviewKind.OTHER} and use_handler:
+        if kind == PreviewKind.DESIGN and (image := design_thumbnail(path_for_view(), 2048, stop,
+                                                                      prefer_composite=True)):
+            result.image = ImageQt(image)
+        if kind in {PreviewKind.OFFICE, PreviewKind.OTHER, PreviewKind.DESIGN} and use_handler and result.image is None:
             if clsid := handler_for(extension):
                 try:
                     path_for_view(copy=True)
@@ -168,7 +171,7 @@ def load_preview(root, item, gui_thread, stop, progress, *, use_handler=True):
                     thumbnail = shell_thumbnail(image_path, 2048)
                     image = ImageQt(thumbnail) if thumbnail is not None else None
                 result.image = image
-        elif sys.platform == "win32":
+        elif sys.platform == "win32" and kind != PreviewKind.DESIGN:
             thumbnail = shell_thumbnail(path_for_view(), 2048)
             if thumbnail is not None:
                 result.image = ImageQt(thumbnail)

@@ -2,6 +2,7 @@
 
 from functools import partial
 from pathlib import Path
+import sys
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, QSignalBlocker, QThreadPool, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QFontDatabase, QPainter
@@ -26,6 +27,8 @@ QUEUED = Qt.ConnectionType.QueuedConnection
 ARROWS = {Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down}
 FLAGS = {Qt.Key.Key_Z: "green", Qt.Key.Key_X: "red", Qt.Key.Key_C: ""}
 ZOOM_IN = {Qt.Key.Key_Plus, Qt.Key.Key_Equal}
+QUARANTINE_KEYS = (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) if sys.platform == "darwin" else (Qt.Key.Key_Delete,)
+QUARANTINE_HINT = "Delete/Backspace quarantine" if sys.platform == "darwin" else "Delete quarantine"
 
 
 class ImageItem(QGraphicsItem):
@@ -176,6 +179,7 @@ class QuickLook(QDialog):
     navigate = Signal(object)
     flag_requested = Signal(str)
     choice_requested = Signal(str)
+    quarantine_requested = Signal()
     open_requested = Signal(object)
     idle = Signal()
 
@@ -301,7 +305,8 @@ class QuickLook(QDialog):
             button.clicked.connect(partial(self.flag_requested.emit, flag))
             footer.addWidget(button)
         hint = self.label()
-        hint.setText("←→ next · K play/pause · Space/Esc close")
+        hint.setText(f"←→ next · K play/pause · {QUARANTINE_HINT} · Space/Esc close")
+        hint.setWordWrap(True)
         footer.addWidget(hint)
         footer.addWidget(self.fit)
         footer.addWidget(self.open_button)
@@ -498,7 +503,7 @@ class QuickLook(QDialog):
         if action is None:
             return super().eventFilter(watched, event)
         event.accept()
-        if event.type() == QEvent.Type.KeyPress:
+        if event.type() == QEvent.Type.KeyPress and not (event.key() in QUARANTINE_KEYS and event.isAutoRepeat()):
             action()
         return True
 
@@ -511,6 +516,8 @@ class QuickLook(QDialog):
             return partial(self.flag_requested.emit, FLAGS[key])
         if key == Qt.Key.Key_R:
             return partial(self.choice_requested.emit, "")
+        if key in QUARANTINE_KEYS:
+            return self.quarantine_requested.emit
         if key == Qt.Key.Key_K and self.stack.currentWidget() is self.media:
             return self.media.toggle
         if key in ZOOM_IN | {Qt.Key.Key_Minus} and self.stack.currentWidget() is self.image:
