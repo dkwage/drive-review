@@ -32,6 +32,7 @@ class ThumbnailQueue(QObject):
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(4)
         self.drive = None
+        self.paused = False
         self.pending = {}
         self.images = OrderedDict()
         self.repaint = QTimer(self)
@@ -50,6 +51,14 @@ class ThumbnailQueue(QObject):
         for worker in self.pending.values():
             worker.stop.set()
 
+    def set_paused(self, paused):
+        self.paused = paused
+        if paused:
+            for worker in self.pending.values():
+                worker.stop.set()
+        else:
+            self.parent().viewport().update()
+
     def request(self, item, size):
         if (self.drive is None or not can_thumbnail(item)
                 or (item.zip_entry and (item.category == "Video" or item.size > MAX_AUTO_MEMBER))):
@@ -58,7 +67,7 @@ class ThumbnailQueue(QObject):
         if key in self.images:
             self.images.move_to_end(key)
             return self.images[key]
-        if len(self.pending) >= 20 or key in self.pending:
+        if self.paused or len(self.pending) >= 20 or key in self.pending:
             return None
 
         drive = self.drive

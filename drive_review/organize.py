@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, replace
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import stat
+from uuid import uuid4
 
 from .paths import REVIEW_DIR, is_link, move_no_replace, native_path, relative_parts, safe_path
 
@@ -73,6 +74,20 @@ def _occupied(path):
     except FileNotFoundError:
         return False
     return True
+
+
+def _rename_case_only(source, target):
+    # The destination may still resolve to the source until it vacates its old name.
+    intermediate = source.with_name(f".drive-review-rename-{uuid4().hex}")
+    move_no_replace(source, intermediate)
+    try:
+        move_no_replace(intermediate, target)
+    except OSError as error:
+        try:
+            move_no_replace(intermediate, source)
+        except OSError as failure:
+            raise OSError(f"{error}. Could not restore {source.name} from {intermediate}. {failure}") from error
+        raise
 
 
 def _move_group(root, parent_rel, device, entries, names, result, *, directory=False):
@@ -168,8 +183,13 @@ def _folder_totals(root, source, device, expected, stop):
             for child in children:
                 if stop is not None and stop.is_set():
                     raise InterruptedError("Move canceled.")
-                info = child.stat(follow_symlinks=False)
-                if is_link(info) or info.st_dev != device or child.name.casefold() == REVIEW_DIR:
+                # Keep the directory entry's reparse attributes. On Windows its
+                # device and inode fields are zero, so get identity from lstat.
+                entry_info = child.stat(follow_symlinks=False)
+                if is_link(entry_info) or child.name.casefold() == REVIEW_DIR:
+                    raise ValueError(f"The folder contains a link, mount or management path: {child.path}")
+                info = os.lstat(child.path) if not entry_info.st_dev else entry_info
+                if is_link(info) or info.st_dev != device:
                     raise ValueError(f"The folder contains a link, mount or management path: {child.path}")
                 if expected:
                     relative = Path(child.path).relative_to(root).as_posix()
@@ -225,12 +245,11 @@ def move_path(root, source_rel, destination_rel, *, name=None, item=None, scanne
         if stop is not None and stop.is_set():
             raise InterruptedError("Move canceled.")
         entry = source, count, size
+        target = parent / (name or source.name)
         if (name is not None and same_parent and name.casefold() == source.name.casefold()
-                and _occupied(parent / name) and os.path.samefile(source, parent / name)
-                and name not in os.listdir(parent)):
-            # An alternate spelling on a case-insensitive volume refers to the source.
-            target = parent / name
-            move_no_replace(source, target)
+                and (not _occupied(target) or
+                     (os.path.samefile(source, target) and name not in os.listdir(parent)))):
+            _rename_case_only(source, target)
             _record(result, root, destination_rel, entry, target)
         else:
             _move_group(root, destination_rel, device, [entry], (name or source.name,), result, directory=directory)

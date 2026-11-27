@@ -6,6 +6,7 @@ from functools import partial
 from pathlib import Path
 import shutil
 from sqlite3 import Error as SQLiteError
+import sys
 import tempfile
 
 from PySide6.QtCore import (
@@ -40,6 +41,7 @@ from .quick_look import QUARANTINE_HINT, QUARANTINE_KEYS, QuickLook
 from .workers import Worker
 
 QUEUED = Qt.ConnectionType.QueuedConnection
+WAIT_FOR_SOURCE_READERS = sys.platform == "win32"
 
 STYLE = """
 QMainWindow, QDialog { background: #F5F8F6; color: #172D2A; }
@@ -102,6 +104,8 @@ class MainWindow(QMainWindow):
         self.quarantine_count = self.quarantine_size = 0
         self.preview_filter_dirty = False
         self.operation = None
+        self.source_move = False
+        self.pending_source_move = None
         self.capture = None
         self.capture_pass = None
         self.capture_request = None
@@ -137,7 +141,7 @@ class MainWindow(QMainWindow):
         self.quick_look.choice_requested.connect(self.choose_pair_upload)
         self.quick_look.quarantine_requested.connect(self.quarantine_selected)
         self.quick_look.open_requested.connect(self.open_selected)
-        self.quick_look.idle.connect(self._thumbnail_idle)
+        self.quick_look.idle.connect(self._source_readers_idle)
         self.quick_look.finished.connect(self._preview_closed)
         self.grid.selectionModel().currentChanged.connect(self._sync_preview)
         self.preview_escape = QShortcut(QKeySequence("Esc"), self)
@@ -345,7 +349,7 @@ class MainWindow(QMainWindow):
         self.grid.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.grid.customContextMenuRequested.connect(self._grid_context)
         self.thumbnails = ThumbnailQueue(ThumbnailCache(self.data_dir / "thumbs"), self.grid)
-        self.thumbnails.idle.connect(self._thumbnail_idle)
+        self.thumbnails.idle.connect(self._source_readers_idle)
         self.delegate = ReviewDelegate(self.thumbnails, self.grid)
         self.grid.setItemDelegate(self.delegate)
         self._resize_thumbs(self.thumb_size.value())
@@ -423,11 +427,15 @@ class MainWindow(QMainWindow):
         dialog.setDetailedText("\n".join(shown))
         dialog.exec()
 
-    def _run(self, label, function, success, progress=None, *, finish_before_close=False):
+    def _run(self, label, function, success, progress=None, *, finish_before_close=False, source_move=False):
         if self.operation is not None:
             return
         worker = Worker(function)
         self.operation = worker
+        pause_readers = source_move and WAIT_FOR_SOURCE_READERS
+        self.source_move = pause_readers
+        resume_capture = (pause_readers and self.capture_pass is not None
+                          and not self.capture_pass.stop.is_set())
         self.progress_label.setText(label)
         self.progress.setRange(0, 0)
         self.cancel_button.setEnabled(True)
@@ -439,6 +447,9 @@ class MainWindow(QMainWindow):
 
         def finished(result, error):
             self.operation = None
+            if pause_readers:
+                self.source_move = False
+                self.thumbnails.set_paused(False)
             for widget in (self.progress_label, self.progress, self.cancel_button):
                 widget.hide()
             if self.closing and not finish_before_close:
@@ -453,12 +464,28 @@ class MainWindow(QMainWindow):
                     success(result)
                 except (OSError, ValueError, SQLiteError) as failure:
                     self._set_notice([f"{label} failed", str(failure)])
+            if pause_readers and not self._busy():
+                if resume_capture:
+                    self._start_capture_pass([item for item in self.model.items
+                                              if item.category in ("Image", "Video")])
+                self._sync_preview()
             self._update_controls()
             if self.closing:
                 self.close()
 
         worker.signals.done.connect(finished, QUEUED)
-        self.pool.start(worker)
+        if pause_readers:
+            # Windows can reject renames while preview or metadata readers hold source handles.
+            self.thumbnails.set_paused(True)
+            if self.quick_look.isVisible():
+                self.quick_look.clear()
+                self.quick_look.item = None
+            self._cancel_capture_pass(detach=True)
+            self._cancel_preview_taken()
+            self.pending_source_move = worker
+            self._source_readers_idle()
+        else:
+            self.pool.start(worker)
 
     def _work_progress(self, values):
         count, total = values[:2]
@@ -589,7 +616,8 @@ class MainWindow(QMainWindow):
     def _start_capture_pass(self, media):
         capture = self.capture
         total = len(media)
-        if total == len(capture.cached):
+        cached_count = sum(item.key in capture.cached for item in media)
+        if total == cached_count:
             return
         remaining = {item.key: item for item in media}
         first = max(0, self.grid.currentIndex().row() - 16)
@@ -598,7 +626,7 @@ class MainWindow(QMainWindow):
         worker = Worker(partial(capture.read_all, items))
         self.capture_pass = worker
         self.capture_workers.add(worker)
-        self.capture_status.setText(f"Reading capture dates {len(capture.cached):,} / {total:,}")
+        self.capture_status.setText(f"Reading capture dates {cached_count:,} / {total:,}")
         self.capture_status.show()
         self.capture_cancel.setEnabled(True)
         self.capture_cancel.show()
@@ -651,8 +679,7 @@ class MainWindow(QMainWindow):
 
     def _capture_finished(self, worker):
         self.capture_workers.discard(worker)
-        if self.closing:
-            self.close()
+        self._source_readers_idle()
 
     def _toggle_hidden(self, checked):
         self.settings.setValue("show_hidden", checked)
@@ -1012,7 +1039,7 @@ class MainWindow(QMainWindow):
         self.quick_look.activateWindow()
 
     def _sync_preview(self, *_args):
-        if not self.quick_look.isVisible():
+        if self.source_move or not self.quick_look.isVisible():
             return
         current = self.grid.currentIndex()
         item = current.data(ITEM)
@@ -1205,7 +1232,7 @@ class MainWindow(QMainWindow):
             archive = next((item for item in scanned if item.key == (path, "")), None)
         self._run("Moving", lambda stop, _report: move_path(root, path, destination, name=name,
                                                            item=archive, scanned=scanned, stop=stop),
-                  self._finish_organizing, finish_before_close=True)
+                  self._finish_organizing, finish_before_close=True, source_move=True)
 
     def _selection_for_move(self):
         items = self._selected_items()
@@ -1252,7 +1279,7 @@ class MainWindow(QMainWindow):
                 files, pairs = collect(stop)
                 return move_items(root, files, destination, stop, pairs=pairs)
 
-            self._run("Moving", move, self._finish_organizing, finish_before_close=True)
+            self._run("Moving", move, self._finish_organizing, finish_before_close=True, source_move=True)
 
     def choose_move_flagged(self, status):
         if self._busy() or self.drive is None:
@@ -1305,7 +1332,7 @@ class MainWindow(QMainWindow):
                 result.errors[:0] = errors
                 return result
 
-            self._run("Moving", move, self._finish_organizing, finish_before_close=True)
+            self._run("Moving", move, self._finish_organizing, finish_before_close=True, source_move=True)
 
     def _finish_organizing(self, result):
         messages = [f"Moved {result.moved:,} files · {bytes_label(result.size)}", *result.errors]
@@ -1360,7 +1387,7 @@ class MainWindow(QMainWindow):
             return result
 
         self._run("Moving to quarantine", move, self._finish_quarantine_selected, self._work_progress,
-                  finish_before_close=True)
+                  finish_before_close=True, source_move=True)
 
     def _finish_quarantine_selected(self, result):
         self._set_notice([f"Moved {result.moved:,} files to quarantine · Restore from Owner menu", *result.errors])
@@ -1588,6 +1615,10 @@ class MainWindow(QMainWindow):
             self.settings.sync()
             event.accept()
 
-    def _thumbnail_idle(self):
-        if self.closing:
+    def _source_readers_idle(self):
+        if self.pending_source_move is not None:
+            if not (self.thumbnails.pending or self.quick_look.pending or self.capture_workers):
+                worker, self.pending_source_move = self.pending_source_move, None
+                self.pool.start(worker)
+        elif self.closing:
             self.close()

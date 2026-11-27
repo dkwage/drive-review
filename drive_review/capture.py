@@ -79,7 +79,7 @@ class CaptureDates:
 
     def read_all(self, items, stop, report):
         total = len(items)
-        count = len(self.cached)
+        count = sum(item.key in self.cached for item in items)
         batch = {}
         started = monotonic()
         try:

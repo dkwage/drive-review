@@ -700,6 +700,50 @@ class ReviewSmokeTests(unittest.TestCase):
                 window.close()
                 self.wait_until(lambda: not window.isVisible())
 
+    def test_delete_waits_for_an_open_thumbnail_before_quarantine(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "drive"
+            root.mkdir()
+            source = root / "photo.jpg"
+            Image.new("RGB", (8, 8)).save(source)
+            opened, release, closed = Event(), Event(), Event()
+
+            def read_thumbnail(_drive, _item, _size, *, stop):
+                with source.open("rb"):
+                    opened.set()
+                    if not release.wait(8):
+                        raise TimeoutError("Thumbnail was not released")
+                closed.set()
+
+            def quarantine(*args):
+                self.assertTrue(closed.is_set(), "Quarantine started with the thumbnail handle open")
+                return quarantine_items(*args)
+
+            window = MainWindow(base / "local", list_drives=False)
+            window.show()
+            try:
+                with (patch.object(window.thumbnails.cache, "get", side_effect=read_thumbnail),
+                      patch("drive_review.ui.window.WAIT_FOR_SOURCE_READERS", True),
+                      patch("drive_review.ui.window.quarantine_items", side_effect=quarantine)):
+                    window.open_root(root)
+                    self.wait_until(lambda: not window._busy() and window.capture_pass is None)
+                    item = window.model.items[0]
+                    window.thumbnails.request(item, 144)
+                    self.wait_until(opened.is_set)
+                    window.grid.setCurrentIndex(window.model.index(0))
+                    window.grid.setFocus()
+                    QTest.keyClick(window.grid, Qt.Key.Key_Delete)
+                    self.assertTrue(window._busy())
+                    self.assertTrue(source.is_file())
+                    release.set()
+                    self.wait_until(lambda: window.quarantine_count == 1 and window.saved_revision == window.revision)
+                    self.assertTrue((root / QUARANTINE / source.name).is_file())
+            finally:
+                release.set()
+                window.close()
+                self.wait_until(lambda: not window.isVisible())
+
     def test_organize_m_shortcut_opens_picker_and_moves_pair_with_flags(self):
         with TemporaryDirectory() as directory:
             base = Path(directory).resolve()

@@ -58,6 +58,21 @@ class OrganizeTests(unittest.TestCase):
         self.assertEqual(renamed.mapping, {"album": "Album"})
         self.assertIn("Album", os.listdir(self.root))
 
+    def test_case_only_rename_restores_original_spelling_if_final_rename_fails(self):
+        source_file = self.write("album/photo.jpg")
+
+        def fail_final_rename(source, target):
+            if target.name == "Album":
+                raise PermissionError("Final rename blocked")
+            move_no_replace(source, target)
+
+        with patch("drive_review.organize.move_no_replace", side_effect=fail_final_rename):
+            result = move_path(self.root, "album", "", name="Album")
+        self.assertEqual(result.mapping, {})
+        self.assertIn("Final rename blocked", result.errors[0])
+        self.assertEqual(set(os.listdir(self.root)), {"album", "target"})
+        self.assertEqual(source_file.read_bytes(), b"data")
+
     def test_rejects_same_folder_self_and_descendants(self):
         source = self.write("album/sub/photo.jpg")
         item = self.items()["album/sub/photo.jpg", ""]
