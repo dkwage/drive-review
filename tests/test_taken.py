@@ -1,6 +1,7 @@
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from contextlib import closing
 from sqlite3 import connect
 from struct import pack
 from tempfile import TemporaryDirectory
@@ -215,7 +216,7 @@ class CaptureCacheTests(unittest.TestCase):
             root = base / "drive"
             root.mkdir()
             path = base / "existing.sqlite"
-            with connect(path) as old:
+            with closing(connect(path)) as old, old:
                 old.execute("CREATE TABLE drives (id TEXT PRIMARY KEY, label TEXT NOT NULL, serial TEXT NOT NULL, root TEXT NOT NULL)")
                 old.execute("INSERT INTO drives VALUES ('old', 'Old drive', '', '/old')")
             (root / "a.jpg").write_bytes(photo())
