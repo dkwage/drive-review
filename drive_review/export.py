@@ -10,6 +10,7 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, WriteOnlyCell
 from openpyxl.styles import Font
 from openpyxl.utils.cell import get_column_letter
 
+from .capture import ITEM_READ_ERRORS, read_item_taken
 from .dupes import check_cancel, hash_stream
 from .flags import atomic_csv
 from .items import CATEGORY_LABELS, iso_mtime
@@ -17,7 +18,8 @@ from .paths import move_no_replace, outside_source, safe_path
 from .zipsource import ItemReader
 
 MANIFEST = ("dest_path", "source_rel_path", "zip_entry", "hash")
-HEADERS = ("Category", "File Name", "Extension", "Relative Path", "Size (bytes)", "Created", "Modified", "Flag", "Hash")
+HEADERS = ("Category", "File Name", "Extension", "Relative Path", "Size (bytes)",
+           "Created", "Taken", "Modified", "Flag", "Hash")
 EXCEL_ROWS = 1_048_575
 
 
@@ -104,7 +106,7 @@ def text_cell(value):
 
 
 def inventory_excel(root, destination, label, items, flags, hashes, stop=None,
-                    progress=lambda count, total: None):
+                    progress=lambda count, total: None, *, capture=None):
     destination = outside_source(root, destination)
     if destination.suffix.lower() != ".xlsx":
         raise ValueError("Choose an .xlsx file.")
@@ -116,7 +118,7 @@ def inventory_excel(root, destination, label, items, flags, hashes, stop=None,
         for offset in range(0, max(1, len(items)), EXCEL_ROWS):
             sheet = book.create_sheet(sheet_title(label, book.sheetnames))
             sheet.freeze_panes = "A2"
-            for column, width in enumerate((15, 35, 12, 65, 18, 31, 12, 67), 1):
+            for column, width in enumerate((15, 35, 12, 65, 18, 34, 29, 34, 12, 67), 1):
                 sheet.column_dimensions[get_column_letter(column)].width = width
 
             if streaming:
@@ -132,30 +134,41 @@ def inventory_excel(root, destination, label, items, flags, hashes, stop=None,
             chunk = items[offset:offset + EXCEL_ROWS]
             # Once a write-only sheet starts, finish its XML even if the operation is cancelled.
             try:
-                for count, item in enumerate(chunk, 1):
-                    check_cancel(stop)
-                    flag = flags.get(item.key)
-                    known_hash = hashes.get(item.key, "")
-                    status = flag.flag if flag and flag.matches(item) and (
-                        not known_hash or flag.hash in ("", known_hash)) else ""
-                    values = (CATEGORY_LABELS[item.category], item.name, PurePosixPath(item.name).suffix.lower(),
-                              item.identity, item.size, iso_mtime(item.ctime_ns) if item.ctime_ns else "", iso_mtime(item.mtime_ns), status,
-                              known_hash or (flag.hash if status else ""))
-                    values = [text_cell(value) if isinstance(value, str) else value for value in values]
-                    if streaming:
-                        cells = [WriteOnlyCell(sheet, value=value) for value in values]
-                        for cell, value in zip(cells, values):
-                            if isinstance(value, str):
-                                cell.data_type = "s"
-                        sheet.append(cells)
-                    else:
-                        sheet.append(values)
-                        for cell in sheet[count + 1]:
-                            if cell.data_type == "f":
-                                cell.data_type = "s"
-                    if count % 256 == 0 or offset + count == len(items):
-                        progress(offset + count, len(items))
-                sheet.auto_filter.ref = f"A1:H{len(chunk) + 1}"
+                with ItemReader() as reader:
+                    for count, item in enumerate(chunk, 1):
+                        check_cancel(stop)
+                        flag = flags.get(item.key)
+                        known_hash = hashes.get(item.key, "")
+                        status = flag.flag if flag and flag.matches(item) and (
+                            not known_hash or flag.hash in ("", known_hash)) else ""
+                        taken = None
+                        if item.category in ("Image", "Video"):
+                            if capture is not None:
+                                taken = capture.read(item, reader, stop)
+                            else:
+                                try:
+                                    taken = read_item_taken(reader, root, item)
+                                except ITEM_READ_ERRORS:
+                                    pass
+                        values = (CATEGORY_LABELS[item.category], item.name, PurePosixPath(item.name).suffix.lower(),
+                                  item.identity, item.size, iso_mtime(item.ctime_ns) if item.ctime_ns else "",
+                                  taken.label if taken else "", iso_mtime(item.mtime_ns), status,
+                                  known_hash or (flag.hash if status else ""))
+                        values = [text_cell(value) if isinstance(value, str) else value for value in values]
+                        if streaming:
+                            cells = [WriteOnlyCell(sheet, value=value) for value in values]
+                            for cell, value in zip(cells, values):
+                                if isinstance(value, str):
+                                    cell.data_type = "s"
+                            sheet.append(cells)
+                        else:
+                            sheet.append(values)
+                            for cell in sheet[count + 1]:
+                                if cell.data_type == "f":
+                                    cell.data_type = "s"
+                        if count % 256 == 0 or offset + count == len(items):
+                            progress(offset + count, len(items))
+                sheet.auto_filter.ref = f"A1:I{len(chunk) + 1}"
             finally:
                 if streaming:
                     sheet.close()
@@ -167,6 +180,8 @@ def inventory_excel(root, destination, label, items, flags, hashes, stop=None,
         check_cancel(stop)
         os.replace(temp, destination)
     finally:
+        if capture is not None:
+            capture.save()
         if streaming:
             for tab in book.worksheets:
                 # openpyxl leaves the temporary sheet XML behind if save() did not consume it.

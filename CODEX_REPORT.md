@@ -31,3 +31,20 @@ OK
 - The text viewer reads about 2 MiB from plain text files. Native Windows preview handlers and system-provided diagnostics can use the Windows display language.
 - When a flag edit in Quick Look would change membership in the current flag filter, the panel retains the current grid until it closes or the filter is changed.
 - The on-disk thumbnail cache still has no automatic eviction.
+
+## v3 capture dates
+
+Drive Review reads embedded capture dates for supported photos, RAW files, and videos. Quick Look, grid tooltips, and the Excel inventory show the recorded wall-clock text with the UTC offset when available. **By taken** compares offset-aware times in UTC and uses the recorded time directly when the offset is unknown. Unknown dates sort last.
+
+The local SQLite index stores both known and unknown dates by drive, item key, and item stamp. The cancellable background pass reuses the cache and publishes batches. Quick Look requests its current item on a separate worker. Excel export can read remaining dates even after the background pass has been stopped.
+
+```text
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -v
+Ran 42 tests in 3.222s
+
+OK
+```
+
+- The existing 29 tests passed on macOS arm64 with Python 3.12.16 in the existing uv-managed `.venv`. Added 13 tests for metadata parsing, the read cap, ZIP members, cache migration and invalidation, cancellation and resume, and offscreen Quick Look and sorting. The inventory test also checks the position and content of the **Taken** column.
+- Spot checks returned capture dates for CR2, CR3, DNG, NEF, RAF, RW2, and MOV samples. The automated tests generate JPEG, PNG, HEIF, and, where the Pillow encoders are available, WebP and AVIF fixtures. [ExifTool sample files](https://github.com/exiftool/exiftool/tree/master/t/images)
+- The 4 MiB read budget permits seeking past large payloads in loose files. For ZIP entries and other sequential streams, the reader can only reach metadata in the first 4 MiB. Native Windows verification remains pending.

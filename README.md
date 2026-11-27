@@ -22,11 +22,13 @@ Extract `DriveReview-Windows.zip` and run `DriveReview.exe` from the extracted `
 | Esc | Close Quick Look |
 | Enter or double-click | Open a local temporary copy in the default app |
 
-Search by name or path, filter by category or flag, and sort by name, size, date, or folder. **Show system items** includes files normally hidden from the review. The status bar shows the file count and total size for **Upload**, **Delete**, and **In quarantine** across the open source.
+Search by name or path, filter by category or flag, and sort by name, size, date, or folder. **By taken** lists the newest capture dates first and puts files with an unknown capture date at the end. **Show system items** includes files normally hidden from the review. The status bar shows the file count and total size for **Upload**, **Delete**, and **In quarantine** across the open source.
 
 ### Quick Look
 
-Press Space on a selected file. The panel shows the name, size, creation and modification dates, path, flag, and position in the current grid. It remembers its size. The arrow keys move the grid selection while the panel is open. Z, X, and C apply to the current file; the same actions are buttons at the bottom of the panel.
+Press Space on a selected file. The panel shows the name, size, **Taken** date when available, file creation and modification dates, path, flag, and position in the current grid. It remembers its size. The arrow keys move the grid selection while the panel is open. Z, X, and C apply to the current file; the same actions are buttons at the bottom of the panel.
+
+**Taken** comes from embedded EXIF in photos and RAW files, or the QuickTime creation date or movie header in MP4, MOV, M4V, and 3GP videos. Drive Review displays the recorded time with its UTC offset when available and displays offset-free times as recorded. The grid tooltip and Excel inventory show the same value. Capture dates are read in the background after a scan and cached locally. For ZIP entries, metadata must be reachable within the first 4 MiB of the entry.
 
 - Images open at full resolution where a decoder is available and fit the window by default. Use the mouse wheel or **+** and **−** to zoom. Click **Fit** to reset the zoom. The Windows Shell can supply a large thumbnail for RAW and other formats with an installed codec.
 - Play video and audio inline. Press **K** or click **Play** or **Pause**. The controls include seeking, elapsed time, volume, and mute.
@@ -47,7 +49,7 @@ Use **Duplicate groups** to review suggested keepers and matching drives. Automa
 - **Restore quarantined files…** returns files to their original locations. If a destination is occupied, the app reports the collision and keeps the quarantined file.
 - **Delete quarantine permanently…** shows the eligible count and exact byte total. Type the displayed count to confirm. The app deletes only confirmed files recorded in the quarantine log whose size and modification time still match. It records successful deletions as `deleted` and removes directories emptied by deletion. Permanent deletion cannot be undone.
 
-**Export Excel inventory…** adds a worksheet to a new or existing workbook with categories, file names, extensions, paths, sizes, timestamps, flags, and hashes.
+**Export Excel inventory…** adds a worksheet to a new or existing workbook with categories, file names, extensions, paths, sizes, timestamps, flags, and hashes. The **Taken** column appears after **Created** and is blank when the capture date is unknown.
 
 ## flags.csv
 

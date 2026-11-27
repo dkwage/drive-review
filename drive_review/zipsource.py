@@ -75,7 +75,7 @@ class ItemReader(AbstractContextManager):
         return self.archives[key]
 
     @contextmanager
-    def open(self, root, item):
+    def open(self, root, item, *, buffering=-1):
         path, info = validate_item(root, item)
         if item.zip_entry:
             archive = self.archive(path, info)
@@ -85,7 +85,7 @@ class ItemReader(AbstractContextManager):
             with archive.open(member) as stream:
                 yield stream
         else:
-            with path.open("rb") as stream:
+            with path.open("rb", buffering=buffering) as stream:
                 yield stream
         final = path.lstat()
         if (file_stamp(final), final.st_dev, final.st_ino, final.st_ctime_ns) != (

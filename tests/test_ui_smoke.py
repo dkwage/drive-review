@@ -18,6 +18,7 @@ from PySide6.QtGui import QFont, QPainter, QPdfWriter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit, QMessageBox
 
+from drive_review.capture import read_item_taken
 from drive_review.flags import read_flags
 from drive_review.quarantine import QUARANTINE, quarantine_items
 from drive_review.scan import scan
@@ -243,6 +244,61 @@ class ReviewSmokeTests(unittest.TestCase):
                 self.assertFalse(preview.isVisible())
                 self.wait_until(lambda: not temp_path.exists())
             finally:
+                window.close()
+                self.wait_until(lambda: not window.isVisible())
+
+    def test_quick_look_reads_taken_before_background_pass_and_keeps_selection_when_sorted(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "drive"
+            root.mkdir()
+            (root / "00-notes.txt").touch()
+            image = Image.new("RGB", (20, 20))
+            image.save(root / "z-unknown.jpg")
+            for name, date, offset in (("a-blocked.jpg", "2024:01:02 10:14:59", "+00:00"),
+                                       ("b-preview.jpg", "2019:06:02 05:04:05", "+02:00"),
+                                       ("c-equal.jpg", "2019:06:02 03:04:05", "+00:00")):
+                exif = image.getexif()
+                exif[0x8769] = {0x9003: date, 0x9011: offset}
+                image.save(root / name, exif=exif)
+
+            entered, release = Event(), Event()
+
+            def hold_first(reader, source, item):
+                if item.name == "a-blocked.jpg":
+                    entered.set()
+                    if not release.wait(8):
+                        raise TimeoutError("Capture date worker was not released")
+                return read_item_taken(reader, source, item)
+
+            window = MainWindow(base / "local", list_drives=False)
+            window.show()
+            preview = window.quick_look
+            try:
+                with patch("drive_review.capture.read_item_taken", side_effect=hold_first) as reads:
+                    window.open_root(root)
+                    self.wait_until(entered.is_set)
+                    self.assertEqual(window.capture_status.text(), "Reading capture dates 0 / 4")
+                    window.sort.setCurrentIndex(window.sort.findData("taken"))
+                    window.grid.setCurrentIndex(window.model.index(window.model.rows[("b-preview.jpg", "")]))
+                    window.preview_selected()
+                    self.wait_until(lambda: "Taken 2019-06-02 05:04:05 +02:00" in preview.details.text())
+                    self.assertIn(" · Taken 2019-06-02 05:04:05 +02:00 · Created ", preview.details.text())
+                    self.assertIn(" · Modified ", preview.details.text())
+                    self.wait_until(lambda: window.model.visible[0].name == "b-preview.jpg")
+                    release.set()
+                    self.wait_until(lambda: window.capture_pass is None and window.model.visible[0].name == "a-blocked.jpg")
+                    self.assertEqual([item.name for item in window.model.visible],
+                                     ["a-blocked.jpg", "b-preview.jpg", "c-equal.jpg", "00-notes.txt", "z-unknown.jpg"])
+                    self.assertEqual(window.grid.currentIndex().data(), "b-preview.jpg")
+                    self.assertEqual(preview.position.text(), "2 / 5")
+                    self.assertIn("\nTaken 2019-06-02 05:04:05 +02:00\n",
+                                  window.grid.currentIndex().data(Qt.ItemDataRole.ToolTipRole))
+                    self.assertEqual(sum(call.args[2].name == "b-preview.jpg" for call in reads.call_args_list), 1)
+                    window.grid.setCurrentIndex(window.model.index(4))
+                    self.assertNotIn("Taken", preview.details.text())
+            finally:
+                release.set()
                 window.close()
                 self.wait_until(lambda: not window.isVisible())
 

@@ -300,10 +300,7 @@ class QuickLook(QDialog):
                 path = display_path(Path(root) / item.rel_path)
                 if item.zip_entry:
                     path += f"::{item.zip_entry}"
-                self.details.setText(f"{bytes_label(item.size)} · Created {date_label(item.ctime_ns)}"
-                                     f" · Modified {date_label(item.mtime_ns)}")
-            else:
-                self.details.clear()
+            self.set_taken(None)
             self.path.setText(path)
             self.path.setToolTip(path)
             self.open_button.setEnabled(item is not None)
@@ -313,6 +310,17 @@ class QuickLook(QDialog):
         self.position.setText(f"{position:,} / {count:,}" if item else "")
         self.flag.setText({"green": "Upload", "red": "Delete"}.get(flag, "Unflagged") if item else "")
         self.flag.setStyleSheet({"green": "color: #176440", "red": "color: #9A3734"}.get(flag, ""))
+
+    def set_taken(self, taken):
+        if self.item is None:
+            self.details.clear()
+            return
+        item = self.item
+        parts = [bytes_label(item.size)]
+        if taken:
+            parts.append(f"Taken {taken.label}")
+        parts.extend((f"Created {date_label(item.ctime_ns)}", f"Modified {date_label(item.mtime_ns)}"))
+        self.details.setText(" · ".join(parts))
 
     def show_message(self, message, *, file_icon=False):
         self.message.setText(message)

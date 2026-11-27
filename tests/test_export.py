@@ -6,6 +6,7 @@ import unittest
 from zipfile import ZipFile
 
 from openpyxl import load_workbook
+from PIL import Image
 
 from drive_review.export import inventory_excel, prepare_upload
 from drive_review.flags import Flag
@@ -45,19 +46,28 @@ class ExportTests(unittest.TestCase):
 
     def test_inventory_flags_filters_literal_text_and_atomic_cancel(self):
         workbook = self.output / "inventory.xlsx"
+        image = Image.new("RGB", (20, 20))
+        exif = image.getexif()
+        exif[0x8769] = {0x9003: "2020:08:09 10:11:12", 0x9011: "+09:00"}
+        image.save(self.root / "camera.jpg", exif=exif)
+        items = scan(self.root).items
         item = next(item for item in self.items if item.name == "=formula.txt")
         hashes = {item.key: "abc123"}
-        inventory_excel(self.root, workbook, "외장/목록", self.items, self.flags, hashes)
-        inventory_excel(self.root, workbook, "외장/목록", self.items, self.flags, hashes)
+        inventory_excel(self.root, workbook, "외장/목록", items, self.flags, hashes)
+        inventory_excel(self.root, workbook, "외장/목록", items, self.flags, hashes)
         book = load_workbook(workbook)
         try:
             self.assertEqual(book.sheetnames, ["외장_목록", "외장_목록 (2)"])
             for sheet in book:
                 self.assertEqual(sheet.freeze_panes, "A2")
-                self.assertEqual(sheet.auto_filter.ref, "A1:H4")
+                self.assertEqual(sheet.auto_filter.ref, "A1:I5")
+                self.assertEqual([sheet.cell(1, col).value for col in (6, 7, 8)], ["Created", "Taken", "Modified"])
                 row = next(row for row in sheet.iter_rows(min_row=2) if row[1].value == item.name)
                 self.assertEqual(row[1].data_type, "s")
-                self.assertEqual((row[7].value, row[8].value), ("green", "abc123"))
+                self.assertIsNone(row[6].value)
+                self.assertEqual((row[8].value, row[9].value), ("green", "abc123"))
+                photo = next(row for row in sheet.iter_rows(min_row=2) if row[1].value == "camera.jpg")
+                self.assertEqual(photo[6].value, "2020-08-09 10:11:12 +09:00")
         finally:
             book.close()
 

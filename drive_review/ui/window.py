@@ -8,7 +8,7 @@ import shutil
 from sqlite3 import Error as SQLiteError
 import tempfile
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, QSignalBlocker, QThreadPool, QTimer, Qt, QUrl
+from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, QSignalBlocker, QThread, QThreadPool, QTimer, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from ..capture import CaptureDates
 from ..drives import discover_drives, identify_drive
 from ..dupes import check_cancel, find_duplicates
 from ..export import inventory_excel, prepare_upload
@@ -27,6 +28,7 @@ from ..paths import local_data_dir
 from ..quarantine import MoveResult, delete_quarantine, quarantine_inventory, quarantine_items, undo_quarantine
 from ..scan import flagged_items, scan
 from ..thumbs import ThumbnailCache, copy_for_view
+from ..zipsource import ItemReader
 from .grid import ReviewDelegate, ThumbnailQueue
 from .models import FOLDER, ITEM, FolderModel, ReviewModel
 from .quick_look import QuickLook
@@ -92,6 +94,10 @@ class MainWindow(QMainWindow):
         self.quarantine_count = self.quarantine_size = 0
         self.preview_filter_dirty = False
         self.operation = None
+        self.capture = None
+        self.capture_pass = None
+        self.capture_request = None
+        self.capture_workers = set()
         self.discovery = None
         self.saving = None
         self.after_save = None
@@ -100,6 +106,9 @@ class MainWindow(QMainWindow):
 
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(3)
+        self.capture_pool = QThreadPool(self)
+        self.capture_pool.setMaxThreadCount(1)
+        self.capture_pool.setThreadPriority(QThread.Priority.LowPriority)
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
         self.save_timer.setInterval(450)
@@ -108,6 +117,10 @@ class MainWindow(QMainWindow):
         self.filter_timer.setInterval(150)
         self.filter_timer.setSingleShot(True)
         self.filter_timer.timeout.connect(self._apply_filter)
+        self.capture_sort_timer = QTimer(self)
+        self.capture_sort_timer.setSingleShot(True)
+        self.capture_sort_timer.setInterval(200)
+        self.capture_sort_timer.timeout.connect(self._resort_taken)
 
         self._build()
         self.quick_look = QuickLook(self, self.settings)
@@ -212,7 +225,8 @@ class MainWindow(QMainWindow):
         self.flag_filter = self._combo([("All flags", ""), ("Unflagged", "none"), ("Upload", "green"),
                                        ("Delete", "red"), ("Duplicate", "duplicate")])
         self.sort = self._combo([("By name", "name"), ("By size", "size"),
-                                 ("By modified", "date"), ("By created", "created"), ("By folder", "folder")])
+                                 ("By modified", "date"), ("By created", "created"),
+                                 ("By taken", "taken"), ("By folder", "folder")])
         self.search = QLineEdit(placeholderText="Search file names or paths")
         self.search.setClearButtonEnabled(True)
         self.search.setAccessibleName("Search files")
@@ -319,6 +333,11 @@ class MainWindow(QMainWindow):
         self.summary = QLabel()
         bar = self.statusBar()
         bar.addWidget(self.summary, 1)
+        self.capture_status = QLabel()
+        self.capture_cancel = self._button("Stop dates", self._cancel_capture_pass)
+        for widget in (self.capture_status, self.capture_cancel):
+            bar.addPermanentWidget(widget)
+            widget.hide()
         self.progress_label = QLabel()
         self.progress = QProgressBar()
         self.progress.setFixedWidth(127)
@@ -456,6 +475,8 @@ class MainWindow(QMainWindow):
     def _scan_root(self, path, messages=()):
         if self.quick_look.isVisible():
             self.quick_look.close()
+        self._cancel_capture_pass(detach=True)
+        self.capture_sort_timer.stop()
         show_hidden = self.show_hidden.isChecked()
 
         def collect(stop, progress):
@@ -475,10 +496,11 @@ class MainWindow(QMainWindow):
             except (OSError, ValueError) as error:
                 result.errors.append(f"Quarantine status is unavailable. {error}")
                 quarantine = None
-            return drive, store, result, flags, hashes, local, quarantine
+            media = [item for item in result.items if item.category in ("Image", "Video")]
+            return drive, store, result, flags, hashes, local, quarantine, media, CaptureDates(self.index, drive, media)
 
         def loaded(data):
-            self.drive, self.store, result, self.flags, self.hashes, local, quarantine = data
+            self.drive, self.store, result, self.flags, self.hashes, local, quarantine, media, self.capture = data
             self.quarantine_count = quarantine.count if quarantine else 0
             self.quarantine_size = quarantine.size if quarantine else 0
             self.scan_result = result
@@ -487,6 +509,7 @@ class MainWindow(QMainWindow):
             self.source.setText(self.drive.label)
             self.source.setToolTip(str(self.drive.root))
             self.model.items = result.items
+            self.model.taken = dict(self.capture.cached)
             self.groups = []
             self.model.duplicates = {}
             self.model.flag_states = {item.key: flag.flag for item in result.items
@@ -508,8 +531,72 @@ class MainWindow(QMainWindow):
                 notices.append(f"{stale:,} files changed after review and need to be flagged again")
             self._set_notice(notices)
             self.grid.setFocus()
+            self._start_capture_pass(media)
 
         self._run("Scanning", collect, loaded, self._scan_progress)
+
+    def _start_capture_pass(self, media):
+        capture = self.capture
+        total = len(media)
+        if total == len(capture.cached):
+            return
+        remaining = {item.key: item for item in media}
+        first = max(0, self.grid.currentIndex().row() - 16)
+        nearby = [remaining.pop(item.key) for item in self.model.visible[first:first + 64] if item.key in remaining]
+        items = nearby + list(remaining.values())
+        worker = Worker(partial(capture.read_all, items))
+        self.capture_pass = worker
+        self.capture_workers.add(worker)
+        self.capture_status.setText(f"Reading capture dates {len(capture.cached):,} / {total:,}")
+        self.capture_status.show()
+        self.capture_cancel.setEnabled(True)
+        self.capture_cancel.show()
+
+        def progress(values):
+            if self.capture_pass is worker and not self.closing:
+                dates, count, total = values
+                self._show_taken(dates)
+                if not worker.stop.is_set():
+                    self.capture_status.setText(f"Reading capture dates {count:,} / {total:,}")
+
+        def finished(_result, _error):
+            if self.capture_pass is worker:
+                self._cancel_capture_pass(detach=True)
+            self._capture_finished(worker)
+
+        worker.signals.progress.connect(progress, QUEUED)
+        worker.signals.done.connect(finished, QUEUED)
+        self.capture_pool.start(worker)
+
+    def _cancel_capture_pass(self, _checked=False, *, detach=False):
+        if self.capture_pass is not None:
+            self.capture_pass.stop.set()
+            self.capture_cancel.setEnabled(False)
+            self.capture_status.setText("Stopping capture dates…")
+        if detach:
+            self.capture_pass = None
+            self.capture_status.hide()
+            self.capture_cancel.hide()
+
+    def _show_taken(self, dates):
+        changed = [key for key, taken in dates.items() if taken != self.model.taken.get(key)]
+        self.model.taken.update(dates)
+        self.model.changed_details(changed)
+        if changed and self.sort.currentData() == "taken" and not self.capture_sort_timer.isActive():
+            self.capture_sort_timer.start()
+        item = self.quick_look.item
+        if self.quick_look.isVisible() and item is not None and item.key in dates:
+            self.quick_look.set_taken(dates[item.key])
+
+    def _resort_taken(self):
+        if self.sort.currentData() == "taken" and not self.closing:
+            self.model.sort_taken()
+            self._sync_preview()
+
+    def _capture_finished(self, worker):
+        self.capture_workers.discard(worker)
+        if self.closing:
+            self.close()
 
     def _toggle_hidden(self, checked):
         self.settings.setValue("show_hidden", checked)
@@ -589,7 +676,7 @@ class MainWindow(QMainWindow):
                 self._apply_filter()
             else:
                 self.preview_filter_dirty |= filtered
-                self.model.changed_flags(keys)
+                self.model.changed_details(keys)
             self._sync_preview()
             self._update_summary()
             self._dirty()
@@ -772,6 +859,43 @@ class MainWindow(QMainWindow):
         item = current.data(ITEM)
         flag = self.model.flag_states.get(item.key, "") if item else ""
         self.quick_look.set_item(self.drive.root, item, current.row() + 1, self.model.rowCount(), flag)
+        self.quick_look.set_taken(self.model.taken.get(item.key) if item else None)
+        self._request_preview_taken(item)
+
+    def _request_preview_taken(self, item):
+        if self.capture_request is not None and item is not None and self.capture_request[1] == item.key:
+            return
+        self._cancel_preview_taken()
+        if item is None or item.category not in ("Image", "Video") or item.key in self.model.taken:
+            return
+        capture = self.capture
+
+        def read(stop, report):
+            with ItemReader() as reader:
+                taken = capture.read(item, reader, stop)
+            report(taken)
+            capture.save()
+
+        def progress(values):
+            if self.capture is capture and not self.closing:
+                self._show_taken({item.key: values[0]})
+
+        def finished(_result, _error):
+            if self.capture_request is not None and self.capture_request[0] is worker:
+                self.capture_request = None
+            self._capture_finished(worker)
+
+        worker = Worker(read)
+        self.capture_request = worker, item.key
+        self.capture_workers.add(worker)
+        worker.signals.progress.connect(progress, QUEUED)
+        worker.signals.done.connect(finished, QUEUED)
+        self.pool.start(worker, 1)
+
+    def _cancel_preview_taken(self):
+        if self.capture_request is not None:
+            self.capture_request[0].stop.set()
+            self.capture_request = None
 
     def _preview_navigate(self, key):
         if not self.grid.currentIndex().isValid() and self.model.rowCount():
@@ -782,6 +906,7 @@ class MainWindow(QMainWindow):
 
     def _preview_closed(self, _result):
         self.preview_escape.setEnabled(False)
+        self._cancel_preview_taken()
         if self.preview_filter_dirty and not self.closing:
             self._apply_filter()
         if not self.closing:
@@ -952,15 +1077,19 @@ class MainWindow(QMainWindow):
             if not Path(destination).suffix:
                 destination += ".xlsx"
             drive, items = self.drive, list(self.model.items)
+            capture = self.capture
             flags, hashes = dict(self.flags), dict(self.hashes)
             self._after_flags_saved(lambda: self._run(
                 "Save Excel inventory", lambda stop, report: inventory_excel(
-                    drive.root, destination, drive.label, items, flags, hashes, stop, report),
+                    drive.root, destination, drive.label, items, flags, hashes, stop, report, capture=capture),
                 lambda path: self._set_notice([f"Excel inventory saved · {path}"]), self._work_progress))
 
     def closeEvent(self, event):
         self.closing = True
         self.quick_look.close()
+        self._cancel_capture_pass(detach=True)
+        self._cancel_preview_taken()
+        self.capture_sort_timer.stop()
         self._update_controls()
         if self.operation is not None:
             self.cancel_work()
@@ -972,7 +1101,7 @@ class MainWindow(QMainWindow):
             event.ignore()
         else:
             self.thumbnails.cancel()
-            if self.thumbnails.pending or self.quick_look.pending:
+            if self.thumbnails.pending or self.quick_look.pending or self.capture_workers:
                 event.ignore()
                 return
             self.settings.sync()

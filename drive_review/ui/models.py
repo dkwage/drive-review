@@ -18,6 +18,7 @@ class ReviewModel(QAbstractListModel):
         self.visible = []
         self.flag_states = {}
         self.duplicates = {}
+        self.taken = {}
         self.rows = {}
 
     def rowCount(self, parent=QModelIndex()):
@@ -34,6 +35,8 @@ class ReviewModel(QAbstractListModel):
         if role in (Qt.ItemDataRole.ToolTipRole, Qt.ItemDataRole.AccessibleDescriptionRole):
             values = [item.identity, bytes_label(item.size),
                       f"Created {date_label(item.ctime_ns)} · Modified {date_label(item.mtime_ns)}"]
+            if taken := self.taken.get(item.key):
+                values.insert(2, f"Taken {taken.label}")
             if flag := self.flag_states.get(item.key):
                 values.append("Upload" if flag == "green" else "Delete")
             if duplicate := self.duplicates.get(item.key):
@@ -68,6 +71,8 @@ class ReviewModel(QAbstractListModel):
             matches.sort(key=lambda item: (item.mtime_ns, item.name.casefold()), reverse=True)
         elif sort == "created":
             matches.sort(key=lambda item: (item.ctime_ns, item.name.casefold()), reverse=True)
+        elif sort == "taken":
+            matches.sort(key=self._taken_order)
         elif sort == "folder":
             matches.sort(key=lambda item: (item.folder.casefold(), item.name.casefold()))
         else:
@@ -78,7 +83,23 @@ class ReviewModel(QAbstractListModel):
         self.rows = {item.key: row for row, item in enumerate(matches)}
         self.endResetModel()
 
-    def changed_flags(self, keys):
+    def _taken_order(self, item):
+        date = self.taken.get(item.key)
+        return date is None, -date.sort_key if date else 0, item.name.casefold()
+
+    def sort_taken(self):
+        matches = sorted(self.visible, key=self._taken_order)
+        if matches == self.visible:
+            return
+        self.layoutAboutToBeChanged.emit()
+        previous = self.persistentIndexList()
+        keys = [self.visible[index.row()].key for index in previous]
+        self.visible = matches
+        self.rows = {item.key: row for row, item in enumerate(matches)}
+        self.changePersistentIndexList(previous, [self.index(self.rows[key]) for key in keys])
+        self.layoutChanged.emit()
+
+    def changed_details(self, keys):
         rows = sorted({self.rows[key] for key in keys if key in self.rows})
         if rows:
             self.dataChanged.emit(self.index(rows[0]), self.index(rows[-1]),

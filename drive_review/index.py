@@ -9,6 +9,7 @@ import sqlite3
 from .flags import Flag
 from .items import Item
 from .scan import is_junk
+from .taken import Taken
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS drives (
@@ -24,6 +25,11 @@ CREATE INDEX IF NOT EXISTS files_by_size ON files(size) WHERE digest <> '';
 CREATE TABLE IF NOT EXISTS flags (
   drive_id TEXT NOT NULL, rel_path TEXT NOT NULL, zip_entry TEXT NOT NULL, data TEXT NOT NULL,
   PRIMARY KEY (drive_id, rel_path, zip_entry)
+);
+CREATE TABLE IF NOT EXISTS capture_dates (
+  drive_id TEXT NOT NULL, rel_path TEXT NOT NULL, zip_entry TEXT NOT NULL, stamp TEXT NOT NULL,
+  text TEXT, utc_offset TEXT, sort_key INTEGER,
+  PRIMARY KEY (drive_id, rel_path, zip_entry, stamp)
 );
 """
 
@@ -105,6 +111,21 @@ class Index:
                               AND mtime_ns = ? AND crc IS ? AND archive_stamp = ?""",
                            [(r.partial, r.digest, r.content_crc, r.drive_id, *r.item.key, r.item.size,
                              r.item.mtime_ns, r.item.crc, r.item.archive_stamp) for r in records])
+
+    def cached_dates(self, drive_id, items):
+        stamps = {item.key: item.stamp for item in items}
+        with self.connect() as db:
+            rows = db.execute("""SELECT rel_path, zip_entry, stamp, text, utc_offset, sort_key
+                                 FROM capture_dates WHERE drive_id = ?""", (drive_id,))
+            return {(rel, entry): Taken(text, offset, sort_key) if text is not None else None
+                    for rel, entry, stamp, text, offset, sort_key in rows if stamps.get((rel, entry)) == stamp}
+
+    def save_dates(self, drive_id, dates):
+        with self.connect() as db:
+            db.executemany("""INSERT OR REPLACE INTO capture_dates VALUES (?, ?, ?, ?, ?, ?, ?)""", [
+                (drive_id, *item.key, item.stamp, taken.text, taken.offset, taken.sort_key) if taken else
+                (drive_id, *item.key, item.stamp, None, None, None) for item, taken in dates.items()
+            ])
 
     def previous(self, drive, sizes):
         sizes = sorted(sizes)
